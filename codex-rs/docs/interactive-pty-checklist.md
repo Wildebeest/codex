@@ -25,9 +25,9 @@
   - [x] Define `TerminalOverlay` struct + `TerminalOverlayOpen` params (command, call_id, started_at, cwd, session id).
   - [x] Render scrollback buffer using `ansi_escape_line` + wrapping helpers; show header with command + cwd.
   - [x] Track spinner / elapsed timer in header, show status badges (Running, Timed Out, Exit Code).
-- [ ] Forward key events (including Ctrl+C/Z, resize) to the PTY via the new op.
+- [x] Forward key events (including Ctrl+C/Z, resize) to the PTY via the new op.
   - [x] Implement key-to-byte mapping (Enter, Backspace, arrows, Ctrl key combos) and send `Op::ExecWriteInput`.
-  - [ ] Handle window resize events – send size deltas via core once protocol supports it (stub for now).
+  - [x] Handle window resize events – send size deltas via core once protocol supports it (stub for now).
 - [ ] Provide UI affordances to exit overlay (Esc, Ctrl+D when process ends, etc.).
   - [ ] Close overlay when process exits cleanly and buffer drained; restore transcript scrollback.
   - [x] Allow user to exit manually with Esc/`Ctrl+[` while keeping process alive (detach behavior decision).

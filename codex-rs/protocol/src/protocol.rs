@@ -138,6 +138,9 @@ pub enum Op {
     /// Write raw bytes to the stdin of an interactive exec session.
     ExecWriteInput(ExecWriteInput),
 
+    /// Resize the terminal associated with an interactive exec session.
+    ExecResize(ExecResize),
+
     /// Approve a code patch
     PatchApproval {
         /// The id of the submission we are approving
@@ -1100,6 +1103,16 @@ pub struct ExecWriteInput {
     #[serde_as(as = "serde_with::base64::Base64")]
     #[ts(type = "string")]
     pub chunk: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+pub struct ExecResize {
+    /// Identifier for the interactive exec command whose terminal should be resized.
+    pub call_id: String,
+    /// Number of rows in the terminal viewport.
+    pub rows: u16,
+    /// Number of columns in the terminal viewport.
+    pub cols: u16,
 }
 
 #[serde_as]

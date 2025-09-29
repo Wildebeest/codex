@@ -1,10 +1,15 @@
+use std::fmt;
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
+use anyhow::anyhow;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-#[derive(Debug)]
+use portable_pty::MasterPty;
+use portable_pty::PtySize;
+
 pub(crate) struct ExecCommandSession {
     /// Queue for writing bytes to the process stdin (PTY master write side).
     writer_tx: mpsc::Sender<Vec<u8>>,
@@ -27,6 +32,9 @@ pub(crate) struct ExecCommandSession {
 
     /// Tracks whether the underlying process has exited.
     exit_status: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// Shared handle to the PTY master for resize operations.
+    master: Arc<StdMutex<Box<dyn MasterPty + Send>>>,
 }
 
 impl ExecCommandSession {
@@ -38,6 +46,7 @@ impl ExecCommandSession {
         writer_handle: JoinHandle<()>,
         wait_handle: JoinHandle<()>,
         exit_status: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        master: Arc<StdMutex<Box<dyn MasterPty + Send>>>,
     ) -> (Self, broadcast::Receiver<Vec<u8>>) {
         let initial_output_rx = output_tx.subscribe();
         (
@@ -49,6 +58,7 @@ impl ExecCommandSession {
                 writer_handle: StdMutex::new(Some(writer_handle)),
                 wait_handle: StdMutex::new(Some(wait_handle)),
                 exit_status,
+                master,
             },
             initial_output_rx,
         )
@@ -64,6 +74,21 @@ impl ExecCommandSession {
 
     pub(crate) fn has_exited(&self) -> bool {
         self.exit_status.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn resize(&self, size: PtySize) -> anyhow::Result<()> {
+        let master = self
+            .master
+            .lock()
+            .map_err(|_| anyhow!("failed to lock pty master for resize"))?;
+        master.resize(size)?;
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ExecCommandSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExecCommandSession").finish_non_exhaustive()
     }
 }
 

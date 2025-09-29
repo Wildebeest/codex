@@ -1029,13 +1029,11 @@ impl Session {
             .await
             .map_err(|err| CodexErr::Io(io::Error::other(err)))?;
 
-        let session_id_str = session_id.0.to_string();
         let killer = Arc::new(tokio::sync::Mutex::new(Some(killer)));
-        let handle = InteractiveExecHandle::new(writer, killer, session_id_str.clone());
+        let handle = InteractiveExecHandle::new(writer, killer, session_id);
+        begin_ctx.session_id = Some(handle.session_id_str.clone());
         self.register_interactive_exec_handle(begin_ctx.call_id.clone(), handle)
             .await;
-
-        begin_ctx.session_id = Some(session_id_str);
 
         Ok(InteractiveRuntime {
             session_id,
@@ -1326,6 +1324,38 @@ impl Session {
             tx.send(chunk)
                 .await
                 .map_err(|_| io::Error::other("interactive exec channel closed"))
+        } else {
+            Err(io::Error::other("interactive exec not found"))
+        }
+    }
+
+    pub async fn resize_interactive_exec(
+        &self,
+        call_id: &str,
+        rows: u16,
+        cols: u16,
+    ) -> std::io::Result<()> {
+        let session_id = {
+            let state = self.state.lock().await;
+            state
+                .interactive_exec_handle(call_id)
+                .map(|handle| handle.session_id())
+        };
+
+        if let Some(session_id) = session_id {
+            self.services
+                .session_manager
+                .resize_session(
+                    session_id,
+                    portable_pty::PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    },
+                )
+                .await
+                .map_err(io::Error::other)
         } else {
             Err(io::Error::other("interactive exec not found"))
         }
@@ -1731,6 +1761,20 @@ async fn submission_loop(
                     .await
                 {
                     warn!(call_id = %input.call_id, ?err, "failed to write to interactive exec");
+                }
+            }
+            Op::ExecResize(resize) => {
+                if let Err(err) = sess
+                    .resize_interactive_exec(&resize.call_id, resize.rows, resize.cols)
+                    .await
+                {
+                    warn!(
+                        call_id = %resize.call_id,
+                        rows = resize.rows,
+                        cols = resize.cols,
+                        ?err,
+                        "failed to resize interactive exec"
+                    );
                 }
             }
             _ => {

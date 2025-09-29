@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use portable_pty::CommandBuilder;
 use portable_pty::PtySize;
 use portable_pty::native_pty_system;
@@ -328,6 +329,8 @@ async fn create_unified_exec_session(
         command_builder.arg(arg);
     }
 
+    let master = Arc::new(StdMutex::new(pair.master));
+
     let mut child = pair
         .slave
         .spawn_command(command_builder)
@@ -337,10 +340,15 @@ async fn create_unified_exec_session(
     let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(128);
     let (output_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
 
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(UnifiedExecError::create_session)?;
+    let mut reader = {
+        let guard = master
+            .lock()
+            .map_err(|_| UnifiedExecError::create_session(anyhow!("poisoned pty master")))?;
+        
+        guard
+            .try_clone_reader()
+            .map_err(UnifiedExecError::create_session)?
+    };
     let output_tx_clone = output_tx.clone();
     let reader_handle = tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
@@ -360,10 +368,14 @@ async fn create_unified_exec_session(
         }
     });
 
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(UnifiedExecError::create_session)?;
+    let writer = {
+        let guard = master
+            .lock()
+            .map_err(|_| UnifiedExecError::create_session(anyhow!("poisoned pty master")))?;
+        guard
+            .take_writer()
+            .map_err(UnifiedExecError::create_session)?
+    };
     let writer = Arc::new(StdMutex::new(writer));
     let writer_handle = tokio::spawn({
         let writer = writer.clone();
@@ -397,6 +409,7 @@ async fn create_unified_exec_session(
         writer_handle,
         wait_handle,
         exit_status,
+        master.clone(),
     );
     Ok((session, initial_output_rx))
 }

@@ -11,6 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
 
 use crate::conversation_history::ConversationHistory;
+use crate::exec_command::SessionId;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::TokenUsage;
 use crate::protocol::TokenUsageInfo;
@@ -117,8 +118,9 @@ impl SessionState {
 pub(crate) struct InteractiveExecHandle {
     pub(crate) writer: mpsc::Sender<Vec<u8>>,
     killer: Arc<AsyncMutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
+    session_id: SessionId,
     #[allow(dead_code)]
-    pub(crate) session_id: String,
+    pub(crate) session_id_str: String,
 }
 
 impl InteractiveExecHandle {
@@ -126,13 +128,19 @@ impl InteractiveExecHandle {
     pub(crate) fn new(
         writer: mpsc::Sender<Vec<u8>>,
         killer: Arc<AsyncMutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
-        session_id: String,
+        session_id: SessionId,
     ) -> Self {
+        let session_id_str = session_id.0.to_string();
         Self {
             writer,
             killer,
             session_id,
+            session_id_str,
         }
+    }
+
+    pub(crate) fn session_id(&self) -> SessionId {
+        self.session_id
     }
 
     pub(crate) async fn kill(&self) {

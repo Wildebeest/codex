@@ -686,8 +686,8 @@ impl ChatWidget {
 
     pub(crate) fn handle_exec_end_now(&mut self, ev: ExecCommandEndEvent) {
         let running = self.running_commands.remove(&ev.call_id);
-        if let Some(rc) = running.as_ref() {
-            if rc.interactive {
+        if let Some(rc) = running.as_ref()
+            && rc.interactive {
                 let timed_out = ev.exit_code == INTERACTIVE_TIMEOUT_EXIT_CODE;
                 self.app_event_tx
                     .send(AppEvent::TerminalOverlayCommandDone {
@@ -697,7 +697,6 @@ impl ChatWidget {
                         aggregated_output: ev.aggregated_output.clone(),
                     });
             }
-        }
         let (command, parsed) = match running {
             Some(rc) => (rc.command, rc.parsed_cmd),
             None => (vec![ev.call_id.clone()], Vec::new()),

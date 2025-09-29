@@ -120,6 +120,15 @@ impl SessionManager {
         sessions.remove(&session_id).is_some()
     }
 
+    pub async fn resize_session(&self, session_id: SessionId, size: PtySize) -> anyhow::Result<()> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("unknown session id {}", session_id.0))?;
+        session.resize(size)?;
+        Ok(())
+    }
+
     /// Processes the request and is required to send a response via `outgoing`.
     pub async fn handle_exec_command_request(
         &self,
@@ -323,6 +332,8 @@ async fn create_exec_command_session_with_builder(
         pixel_height: 0,
     })?;
 
+    let master = Arc::new(StdMutex::new(pair.master));
+
     // Spawn the provided command into the pty
     let mut child = pair.slave.spawn_command(command_builder)?;
     // Obtain a killer that can signal the process independently of `.wait()`.
@@ -334,7 +345,11 @@ async fn create_exec_command_session_with_builder(
     // Broadcast for streaming PTY output to readers: subscribers receive from subscription time.
     let (output_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
     // Reader task: drain PTY and forward chunks to output channel.
-    let mut reader = pair.master.try_clone_reader()?;
+    let mut reader = {
+        let guard = master.lock().map_err(|_| anyhow!("poisoned pty master"))?;
+        
+        guard.try_clone_reader()?
+    };
     let output_tx_clone = output_tx.clone();
     let reader_handle = tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
@@ -360,7 +375,10 @@ async fn create_exec_command_session_with_builder(
     });
 
     // Writer task: apply stdin writes to the PTY writer.
-    let writer = pair.master.take_writer()?;
+    let writer = {
+        let guard = master.lock().map_err(|_| anyhow!("poisoned pty master"))?;
+        guard.take_writer()?
+    };
     let writer = Arc::new(StdMutex::new(writer));
     let writer_handle = tokio::spawn({
         let writer = writer.clone();
@@ -402,6 +420,7 @@ async fn create_exec_command_session_with_builder(
         writer_handle,
         wait_handle,
         exit_status,
+        master.clone(),
     );
     Ok((session, initial_output_rx, exit_rx, killer_for_handle))
 }

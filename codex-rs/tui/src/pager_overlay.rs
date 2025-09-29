@@ -15,6 +15,7 @@ use crate::tui::TuiEvent;
 use codex_ansi_escape::ansi_escape_line;
 use codex_common::elapsed::format_duration;
 use codex_core::protocol::ExecOutputStream;
+use codex_core::protocol::ExecResize;
 use codex_core::protocol::ExecWriteInput;
 use codex_core::protocol::Op;
 use crossterm::event::KeyCode;
@@ -98,6 +99,7 @@ pub(crate) struct TerminalOverlay {
     is_done: bool,
     app_event_tx: AppEventSender,
     lines_dirty: bool,
+    last_sent_size: Option<(u16, u16)>,
 }
 
 impl TerminalOverlay {
@@ -124,6 +126,7 @@ impl TerminalOverlay {
             is_done: false,
             app_event_tx,
             lines_dirty: true,
+            last_sent_size: None,
         }
     }
 
@@ -205,6 +208,9 @@ impl TerminalOverlay {
             content_height,
         );
         self.render_content(content_area, buf);
+        if self.exit_code.is_none() {
+            self.maybe_send_resize(content_area.height, content_area.width);
+        }
     }
 
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
@@ -297,6 +303,30 @@ impl TerminalOverlay {
             chunk: bytes,
         });
         self.app_event_tx.send(AppEvent::CodexOp(op));
+    }
+
+    fn send_resize(&self, rows: u16, cols: u16) {
+        if self.exit_code.is_some() {
+            return;
+        }
+        let op = Op::ExecResize(ExecResize {
+            call_id: self.call_id.clone(),
+            rows,
+            cols,
+        });
+        self.app_event_tx.send(AppEvent::CodexOp(op));
+    }
+
+    fn maybe_send_resize(&mut self, rows: u16, cols: u16) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        let dims = (rows, cols);
+        if self.last_sent_size == Some(dims) {
+            return;
+        }
+        self.send_resize(rows, cols);
+        self.last_sent_size = Some(dims);
     }
 
     pub(crate) fn push_chunk(&mut self, _stream: ExecOutputStream, chunk: Vec<u8>) {
