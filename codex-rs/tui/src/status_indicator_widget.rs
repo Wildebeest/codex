@@ -24,6 +24,7 @@ pub(crate) struct StatusIndicatorWidget {
     header: String,
     /// Queued user messages to display under the status line.
     queued_messages: Vec<String>,
+    terminal_hint: Option<String>,
 
     elapsed_running: Duration,
     last_resume_at: Instant,
@@ -54,6 +55,7 @@ impl StatusIndicatorWidget {
         Self {
             header: String::from("Working"),
             queued_messages: Vec::new(),
+            terminal_hint: None,
             elapsed_running: Duration::ZERO,
             last_resume_at: Instant::now(),
             is_paused: false,
@@ -109,6 +111,13 @@ impl StatusIndicatorWidget {
         self.frame_requester.schedule_frame();
     }
 
+    pub(crate) fn set_terminal_hint(&mut self, hint: Option<String>) {
+        if self.terminal_hint != hint {
+            self.terminal_hint = hint;
+            self.frame_requester.schedule_frame();
+        }
+    }
+
     pub(crate) fn pause_timer(&mut self) {
         self.pause_timer_at(Instant::now());
     }
@@ -162,12 +171,16 @@ impl WidgetRef for StatusIndicatorWidget {
         // Plain rendering: no borders or padding so the live cell is visually indistinguishable from terminal scrollback.
         let mut spans = vec![" ".repeat(LIVE_PREFIX_COLS as usize).into()];
         spans.extend(shimmer_spans(&self.header));
-        spans.extend(vec![
-            " ".into(),
-            format!("({pretty_elapsed} • ").dim(),
-            "Esc".dim().bold(),
-            " to interrupt)".dim(),
-        ]);
+        spans.push(" ".into());
+        spans.push("(".dim());
+        spans.push(format!("{pretty_elapsed} • ").dim());
+        spans.push("Esc".dim().bold());
+        spans.push(" to interrupt".dim());
+        if let Some(hint) = &self.terminal_hint {
+            spans.push(" • ".dim());
+            spans.push(hint.clone().dim());
+        }
+        spans.push(")".dim());
 
         // Build lines: status, then queued messages, then spacer.
         let mut lines: Vec<Line<'static>> = Vec::new();

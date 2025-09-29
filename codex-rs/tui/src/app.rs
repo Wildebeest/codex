@@ -439,6 +439,18 @@ impl App {
         match key_event {
             KeyEvent {
                 code: KeyCode::Char('t'),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && modifiers.contains(crossterm::event::KeyModifiers::SHIFT) =>
+            {
+                if self.chat_widget.request_terminal_overlay() {
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char('t'),
                 modifiers: crossterm::event::KeyModifiers::CONTROL,
                 kind: KeyEventKind::Press,
                 ..

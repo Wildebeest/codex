@@ -23,6 +23,7 @@ use codex_core::protocol::ExecApprovalRequestEvent;
 use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExecCommandOutputDeltaEvent;
+use codex_core::protocol::ExecOutputStream;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::InputMessageKind;
@@ -122,15 +123,46 @@ struct RunningCommand {
     command: Vec<String>,
     parsed_cmd: Vec<ParsedCommand>,
     interactive: bool,
-    #[allow(dead_code)]
+    cwd: PathBuf,
     session_id: Option<String>,
-    #[allow(dead_code)]
     started_at: Instant,
+}
+
+struct InteractiveBacklog {
+    chunks: VecDeque<(ExecOutputStream, Vec<u8>)>,
+    total_bytes: usize,
+}
+
+impl InteractiveBacklog {
+    fn new() -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            total_bytes: 0,
+        }
+    }
+
+    fn push(&mut self, stream: ExecOutputStream, chunk: Vec<u8>) {
+        self.total_bytes = self.total_bytes.saturating_add(chunk.len());
+        self.chunks.push_back((stream, chunk));
+        while self.total_bytes > INTERACTIVE_BACKLOG_LIMIT_BYTES {
+            if let Some((_, evicted)) = self.chunks.pop_front() {
+                self.total_bytes = self.total_bytes.saturating_sub(evicted.len());
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &(ExecOutputStream, Vec<u8>)> {
+        self.chunks.iter()
+    }
 }
 
 const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 3] = [75.0, 90.0, 95.0];
 
 const INTERACTIVE_TIMEOUT_EXIT_CODE: i32 = 124;
+const TERMINAL_OVERLAY_HINT: &str = "Ctrl+Shift+T to view terminal overlay";
+const INTERACTIVE_BACKLOG_LIMIT_BYTES: usize = 512 * 1024;
 
 #[derive(Default)]
 struct RateLimitWarningState {
@@ -241,6 +273,8 @@ pub(crate) struct ChatWidget {
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
     running_commands: HashMap<String, RunningCommand>,
+    interactive_backlogs: HashMap<String, InteractiveBacklog>,
+    active_interactive_call_id: Option<String>,
     task_complete_pending: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupts: InterruptManager,
@@ -297,6 +331,38 @@ impl ChatWidget {
         {
             self.add_boxed_history(cell);
         }
+    }
+
+    fn set_active_interactive_call(&mut self, call_id: Option<String>) {
+        self.active_interactive_call_id = call_id;
+        if self.active_interactive_call_id.is_some() {
+            self.bottom_pane
+                .set_status_terminal_hint(Some(TERMINAL_OVERLAY_HINT.to_string()));
+        } else {
+            self.bottom_pane.set_status_terminal_hint(None);
+        }
+    }
+
+    fn ensure_active_interactive_call(&mut self) -> Option<String> {
+        if let Some(call_id) = self.active_interactive_call_id.clone()
+            && self
+                .running_commands
+                .get(&call_id)
+                .is_some_and(|rc| rc.interactive)
+        {
+            return Some(call_id);
+        }
+        let next = self
+            .running_commands
+            .iter()
+            .find(|(_, rc)| rc.interactive)
+            .map(|(id, _)| id.clone());
+        if next.is_some() {
+            self.set_active_interactive_call(next.clone());
+        } else {
+            self.set_active_interactive_call(None);
+        }
+        next
     }
 
     // --- Small event handlers ---
@@ -393,6 +459,8 @@ impl ChatWidget {
         // Mark task stopped and request redraw now that all content is in history.
         self.bottom_pane.set_task_running(false);
         self.running_commands.clear();
+        self.interactive_backlogs.clear();
+        self.set_active_interactive_call(None);
         self.request_redraw();
 
         // If there is a queued user message, send exactly one now to begin the next turn.
@@ -448,6 +516,8 @@ impl ChatWidget {
         // Reset running state and clear streaming buffers.
         self.bottom_pane.set_task_running(false);
         self.running_commands.clear();
+        self.interactive_backlogs.clear();
+        self.set_active_interactive_call(None);
         self.stream_controller = None;
     }
 
@@ -529,6 +599,9 @@ impl ChatWidget {
     fn on_exec_command_output_delta(&mut self, ev: ExecCommandOutputDeltaEvent) {
         if let Some(running) = self.running_commands.get(&ev.call_id) {
             if running.interactive {
+                if let Some(backlog) = self.interactive_backlogs.get_mut(&ev.call_id) {
+                    backlog.push(ev.stream.clone(), ev.chunk.clone());
+                }
                 self.app_event_tx.send(AppEvent::TerminalOverlayChunk {
                     call_id: ev.call_id,
                     stream: ev.stream,
@@ -694,23 +767,57 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn request_terminal_overlay(&mut self) -> bool {
+        let call_id = match self.ensure_active_interactive_call() {
+            Some(id) => id,
+            None => return false,
+        };
+        let Some(running) = self.running_commands.get(&call_id) else {
+            return false;
+        };
+        if !running.interactive {
+            return false;
+        }
+        let params = TerminalOverlayOpen {
+            call_id: call_id.clone(),
+            command: running.command.clone(),
+            cwd: running.cwd.clone(),
+            session_id: running.session_id.clone(),
+            started_at: running.started_at,
+        };
+        self.app_event_tx
+            .send(AppEvent::OpenTerminalOverlay(params));
+        if let Some(backlog) = self.interactive_backlogs.get(&call_id) {
+            for (stream, chunk) in backlog.iter() {
+                self.app_event_tx.send(AppEvent::TerminalOverlayChunk {
+                    call_id: call_id.clone(),
+                    stream: stream.clone(),
+                    chunk: chunk.clone(),
+                });
+            }
+        }
+        true
+    }
+
     pub(crate) fn handle_exec_end_now(&mut self, ev: ExecCommandEndEvent) {
         let running = self.running_commands.remove(&ev.call_id);
+        let timed_out_interactive = ev.exit_code == INTERACTIVE_TIMEOUT_EXIT_CODE;
         if let Some(rc) = running.as_ref()
             && rc.interactive
         {
-            let timed_out = ev.exit_code == INTERACTIVE_TIMEOUT_EXIT_CODE;
             self.app_event_tx
                 .send(AppEvent::TerminalOverlayCommandDone {
                     call_id: ev.call_id.clone(),
                     exit_code: ev.exit_code,
-                    timed_out,
+                    timed_out: timed_out_interactive,
                     aggregated_output: ev.aggregated_output.clone(),
                 });
+            self.interactive_backlogs.remove(&ev.call_id);
         }
-        let (command, parsed) = match running {
-            Some(rc) => (rc.command, rc.parsed_cmd),
-            None => (vec![ev.call_id.clone()], Vec::new()),
+        let (command, parsed) = if let Some(rc) = running.as_ref() {
+            (rc.command.clone(), rc.parsed_cmd.clone())
+        } else {
+            (vec![ev.call_id.clone()], Vec::new())
         };
 
         let needs_new = self
@@ -732,13 +839,32 @@ impl ChatWidget {
             .as_mut()
             .and_then(|c| c.as_any_mut().downcast_mut::<ExecCell>())
         {
+            let interactive = running.as_ref().is_some_and(|rc| rc.interactive);
+            let (stdout, stderr, formatted_output) = if interactive {
+                let summary = if timed_out_interactive {
+                    "Interactive session timed out".to_string()
+                } else {
+                    format!("Interactive session exited with code {}", ev.exit_code)
+                };
+                (
+                    String::new(),
+                    String::new(),
+                    format!("{summary}. {TERMINAL_OVERLAY_HINT}."),
+                )
+            } else {
+                (
+                    ev.stdout.clone(),
+                    ev.stderr.clone(),
+                    ev.formatted_output.clone(),
+                )
+            };
             cell.complete_call(
                 &ev.call_id,
                 CommandOutput {
                     exit_code: ev.exit_code,
-                    stdout: ev.stdout.clone(),
-                    stderr: ev.stderr.clone(),
-                    formatted_output: ev.formatted_output.clone(),
+                    stdout,
+                    stderr,
+                    formatted_output,
                 },
                 ev.duration,
             );
@@ -746,6 +872,7 @@ impl ChatWidget {
                 self.flush_active_cell();
             }
         }
+        self.ensure_active_interactive_call();
     }
 
     pub(crate) fn handle_patch_apply_end_now(
@@ -812,6 +939,12 @@ impl ChatWidget {
                 started_at,
             };
             self.app_event_tx.send(AppEvent::OpenTerminalOverlay(open));
+            self.interactive_backlogs
+                .insert(ev.call_id.clone(), InteractiveBacklog::new());
+            self.set_active_interactive_call(Some(ev.call_id.clone()));
+        } else {
+            // Ensure the hint stays cleared when only non-interactive commands remain.
+            self.ensure_active_interactive_call();
         }
         // Ensure the status indicator is visible while the command runs.
         self.running_commands.insert(
@@ -820,6 +953,7 @@ impl ChatWidget {
                 command: ev.command.clone(),
                 parsed_cmd: ev.parsed_cmd.clone(),
                 interactive: ev.interactive,
+                cwd: ev.cwd.clone(),
                 session_id: ev.session_id.clone(),
                 started_at,
             },
@@ -951,6 +1085,8 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             stream_controller: None,
             running_commands: HashMap::new(),
+            interactive_backlogs: HashMap::new(),
+            active_interactive_call_id: None,
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
@@ -1013,6 +1149,8 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             stream_controller: None,
             running_commands: HashMap::new(),
+            interactive_backlogs: HashMap::new(),
+            active_interactive_call_id: None,
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),

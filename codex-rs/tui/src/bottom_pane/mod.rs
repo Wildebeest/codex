@@ -68,6 +68,7 @@ pub(crate) struct BottomPane {
     status: Option<StatusIndicatorWidget>,
     /// Queued user messages to show under the status indicator.
     queued_user_messages: Vec<String>,
+    status_terminal_hint: Option<String>,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -100,6 +101,7 @@ impl BottomPane {
             status: None,
             queued_user_messages: Vec::new(),
             esc_backtrack_hint: false,
+            status_terminal_hint: None,
         }
     }
 
@@ -283,6 +285,14 @@ impl BottomPane {
         }
     }
 
+    pub(crate) fn set_status_terminal_hint(&mut self, hint: Option<String>) {
+        self.status_terminal_hint = hint.clone();
+        if let Some(status) = self.status.as_mut() {
+            status.set_terminal_hint(hint);
+        }
+        self.request_redraw();
+    }
+
     pub(crate) fn show_ctrl_c_quit_hint(&mut self) {
         self.ctrl_c_quit_hint = true;
         self.composer
@@ -333,6 +343,7 @@ impl BottomPane {
             }
             if let Some(status) = self.status.as_mut() {
                 status.set_queued_messages(self.queued_user_messages.clone());
+                status.set_terminal_hint(self.status_terminal_hint.clone());
             }
             self.request_redraw();
         } else {

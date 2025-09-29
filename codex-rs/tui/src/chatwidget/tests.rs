@@ -327,6 +327,8 @@ fn make_chatwidget_manual() -> (
         rate_limit_warnings: RateLimitWarningState::default(),
         stream_controller: None,
         running_commands: HashMap::new(),
+        interactive_backlogs: HashMap::new(),
+        active_interactive_call_id: None,
         task_complete_pending: false,
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
