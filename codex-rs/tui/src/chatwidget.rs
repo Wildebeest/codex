@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use codex_core::config::Config;
 use codex_core::config_types::Notifications;
@@ -21,6 +22,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecApprovalRequestEvent;
 use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
+use codex_core::protocol::ExecCommandOutputDeltaEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::InputMessageKind;
@@ -58,6 +60,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
 
 use crate::app_event::AppEvent;
+use crate::app_event::TerminalOverlayOpen;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
@@ -118,9 +121,16 @@ const MAX_TRACKED_GHOST_COMMITS: usize = 20;
 struct RunningCommand {
     command: Vec<String>,
     parsed_cmd: Vec<ParsedCommand>,
+    interactive: bool,
+    #[allow(dead_code)]
+    session_id: Option<String>,
+    #[allow(dead_code)]
+    started_at: Instant,
 }
 
 const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 3] = [75.0, 90.0, 95.0];
+
+const INTERACTIVE_TIMEOUT_EXIT_CODE: i32 = 124;
 
 #[derive(Default)]
 struct RateLimitWarningState {
@@ -516,11 +526,16 @@ impl ChatWidget {
         self.defer_or_handle(|q| q.push_exec_begin(ev), |s| s.handle_exec_begin_now(ev2));
     }
 
-    fn on_exec_command_output_delta(
-        &mut self,
-        _ev: codex_core::protocol::ExecCommandOutputDeltaEvent,
-    ) {
-        // TODO: Handle streaming exec output if/when implemented
+    fn on_exec_command_output_delta(&mut self, ev: ExecCommandOutputDeltaEvent) {
+        if let Some(running) = self.running_commands.get(&ev.call_id)
+            && running.interactive
+        {
+            self.app_event_tx.send(AppEvent::TerminalOverlayChunk {
+                call_id: ev.call_id,
+                stream: ev.stream,
+                chunk: ev.chunk,
+            });
+        }
     }
 
     fn on_patch_apply_begin(&mut self, event: PatchApplyBeginEvent) {
@@ -671,6 +686,18 @@ impl ChatWidget {
 
     pub(crate) fn handle_exec_end_now(&mut self, ev: ExecCommandEndEvent) {
         let running = self.running_commands.remove(&ev.call_id);
+        if let Some(rc) = running.as_ref() {
+            if rc.interactive {
+                let timed_out = ev.exit_code == INTERACTIVE_TIMEOUT_EXIT_CODE;
+                self.app_event_tx
+                    .send(AppEvent::TerminalOverlayCommandDone {
+                        call_id: ev.call_id.clone(),
+                        exit_code: ev.exit_code,
+                        timed_out,
+                        aggregated_output: ev.aggregated_output.clone(),
+                    });
+            }
+        }
         let (command, parsed) = match running {
             Some(rc) => (rc.command, rc.parsed_cmd),
             None => (vec![ev.call_id.clone()], Vec::new()),
@@ -765,12 +792,26 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
+        let started_at = Instant::now();
+        if ev.interactive {
+            let open = TerminalOverlayOpen {
+                call_id: ev.call_id.clone(),
+                command: ev.command.clone(),
+                cwd: ev.cwd.clone(),
+                session_id: ev.session_id.clone(),
+                started_at,
+            };
+            self.app_event_tx.send(AppEvent::OpenTerminalOverlay(open));
+        }
         // Ensure the status indicator is visible while the command runs.
         self.running_commands.insert(
             ev.call_id.clone(),
             RunningCommand {
                 command: ev.command.clone(),
                 parsed_cmd: ev.parsed_cmd.clone(),
+                interactive: ev.interactive,
+                session_id: ev.session_id.clone(),
+                started_at,
             },
         );
         if let Some(cell) = self

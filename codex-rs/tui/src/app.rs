@@ -1,5 +1,6 @@
 use crate::app_backtrack::BacktrackState;
 use crate::app_event::AppEvent;
+use crate::app_event::TerminalOverlayOpen;
 use crate::app_event_sender::AppEventSender;
 use crate::chatwidget::ChatWidget;
 use crate::file_search::FileSearchManager;
@@ -171,7 +172,21 @@ impl App {
         tui: &mut tui::Tui,
         event: TuiEvent,
     ) -> Result<bool> {
-        if self.overlay.is_some() {
+        if matches!(self.overlay, Some(Overlay::Terminal(_))) {
+            let should_close = {
+                let overlay = self.overlay.as_mut().expect("overlay present");
+                if let Overlay::Terminal(term) = overlay {
+                    term.handle_event(tui, event)?;
+                    term.is_done()
+                } else {
+                    false
+                }
+            };
+            if should_close {
+                self.close_overlay(tui);
+                tui.frame_requester().schedule_frame();
+            }
+        } else if self.overlay.is_some() {
             let _ = self.handle_backtrack_overlay_event(tui, event).await?;
         } else {
             match event {
@@ -248,6 +263,34 @@ impl App {
                     } else {
                         tui.insert_history_lines(display);
                     }
+                }
+            }
+            AppEvent::OpenTerminalOverlay(params) => {
+                self.open_terminal_overlay(tui, params);
+            }
+            AppEvent::TerminalOverlayChunk {
+                call_id,
+                stream,
+                chunk,
+            } => {
+                if let Some(Overlay::Terminal(terminal)) = self.overlay.as_mut()
+                    && terminal.matches_call(&call_id)
+                {
+                    terminal.push_chunk(stream, chunk);
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::TerminalOverlayCommandDone {
+                call_id,
+                exit_code,
+                timed_out,
+                aggregated_output,
+            } => {
+                if let Some(Overlay::Terminal(terminal)) = self.overlay.as_mut()
+                    && terminal.matches_call(&call_id)
+                {
+                    terminal.mark_finished(exit_code, timed_out, &aggregated_output);
+                    tui.frame_requester().schedule_frame();
                 }
             }
             AppEvent::StartCommitAnimation => {
@@ -365,6 +408,15 @@ impl App {
             }
         }
         Ok(true)
+    }
+
+    fn open_terminal_overlay(&mut self, tui: &mut tui::Tui, params: TerminalOverlayOpen) {
+        if self.overlay.is_some() {
+            self.close_overlay(tui);
+        }
+        let _ = tui.enter_alt_screen();
+        self.overlay = Some(Overlay::new_terminal(params, self.app_event_tx.clone()));
+        tui.frame_requester().schedule_frame();
     }
 
     pub(crate) fn token_usage(&self) -> codex_core::protocol::TokenUsage {

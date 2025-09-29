@@ -1,7 +1,9 @@
 use std::path::PathBuf;
+use std::time::Instant;
 
 use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
+use codex_core::protocol::ExecOutputStream;
 use codex_file_search::FileMatch;
 
 use crate::history_cell::HistoryCell;
@@ -9,6 +11,15 @@ use crate::history_cell::HistoryCell;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort;
+
+#[derive(Debug, Clone)]
+pub(crate) struct TerminalOverlayOpen {
+    pub call_id: String,
+    pub command: Vec<String>,
+    pub cwd: PathBuf,
+    pub session_id: Option<String>,
+    pub started_at: Instant,
+}
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
@@ -42,6 +53,24 @@ pub(crate) enum AppEvent {
     DiffResult(String),
 
     InsertHistoryCell(Box<dyn HistoryCell>),
+
+    /// Open or refresh the interactive exec terminal overlay.
+    OpenTerminalOverlay(TerminalOverlayOpen),
+
+    /// Streaming chunk for interactive exec output.
+    TerminalOverlayChunk {
+        call_id: String,
+        stream: ExecOutputStream,
+        chunk: Vec<u8>,
+    },
+
+    /// Final status for an interactive exec command.
+    TerminalOverlayCommandDone {
+        call_id: String,
+        exit_code: i32,
+        timed_out: bool,
+        aggregated_output: String,
+    },
 
     StartCommitAnimation,
     StopCommitAnimation,

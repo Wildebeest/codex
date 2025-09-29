@@ -114,10 +114,14 @@ impl App {
         tui.frame_requester().schedule_frame();
     }
 
-    /// Close transcript overlay and restore normal UI.
-    pub(crate) fn close_transcript_overlay(&mut self, tui: &mut tui::Tui) {
+    /// Close any active overlay and restore the normal inline viewport.
+    pub(crate) fn close_overlay(&mut self, tui: &mut tui::Tui) {
+        if self.overlay.is_none() {
+            return;
+        }
+        let was_transcript = matches!(self.overlay, Some(Overlay::Transcript(_)));
+        let was_backtrack = was_transcript && self.backtrack.overlay_preview_active;
         let _ = tui.leave_alt_screen();
-        let was_backtrack = self.backtrack.overlay_preview_active;
         if !self.deferred_history_lines.is_empty() {
             let lines = std::mem::take(&mut self.deferred_history_lines);
             tui.insert_history_lines(lines);
@@ -212,7 +216,7 @@ impl App {
         if let Some(overlay) = &mut self.overlay {
             overlay.handle_event(tui, event)?;
             if overlay.is_done() {
-                self.close_transcript_overlay(tui);
+                self.close_overlay(tui);
                 tui.frame_requester().schedule_frame();
             }
         }
@@ -228,7 +232,7 @@ impl App {
                 .and_then(|cell| cell.as_any().downcast_ref::<UserHistoryCell>())
                 .map(|c| c.message.clone())
                 .unwrap_or_default();
-            self.close_transcript_overlay(tui);
+            self.close_overlay(tui);
             self.request_backtrack(prefill, base_id, nth_user_message);
         }
         self.reset_backtrack_state();

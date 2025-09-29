@@ -154,6 +154,41 @@ pub(crate) fn log_inbound_app_event(event: &AppEvent) {
             });
             LOGGER.write_json_line(value);
         }
+        AppEvent::OpenTerminalOverlay(open) => {
+            let value = json!({
+                "ts": now_ts(),
+                "dir": "to_tui",
+                "kind": "terminal_overlay_open",
+                "call_id": open.call_id,
+            });
+            LOGGER.write_json_line(value);
+        }
+        AppEvent::TerminalOverlayChunk { call_id, chunk, .. } => {
+            let value = json!({
+                "ts": now_ts(),
+                "dir": "to_tui",
+                "kind": "terminal_overlay_chunk",
+                "call_id": call_id,
+                "len": chunk.len(),
+            });
+            LOGGER.write_json_line(value);
+        }
+        AppEvent::TerminalOverlayCommandDone {
+            call_id,
+            exit_code,
+            timed_out,
+            ..
+        } => {
+            let value = json!({
+                "ts": now_ts(),
+                "dir": "to_tui",
+                "kind": "terminal_overlay_done",
+                "call_id": call_id,
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+            });
+            LOGGER.write_json_line(value);
+        }
         AppEvent::FileSearchResult { query, matches } => {
             let value = json!({
                 "ts": now_ts(),

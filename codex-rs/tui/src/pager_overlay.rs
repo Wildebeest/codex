@@ -1,14 +1,26 @@
 use std::io::Result;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
+use crate::app_event::AppEvent;
+use crate::app_event::TerminalOverlayOpen;
+use crate::app_event_sender::AppEventSender;
+use crate::exec_cell::spinner;
 use crate::history_cell::HistoryCell;
 use crate::render::line_utils::push_owned_lines;
 use crate::tui;
 use crate::tui::TuiEvent;
+use codex_ansi_escape::ansi_escape_line;
+use codex_common::elapsed::format_duration;
+use codex_core::protocol::ExecOutputStream;
+use codex_core::protocol::ExecWriteInput;
+use codex_core::protocol::Op;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -22,10 +34,12 @@ use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
+use shlex::try_join;
 
 pub(crate) enum Overlay {
     Transcript(TranscriptOverlay),
     Static(StaticOverlay),
+    Terminal(TerminalOverlay),
 }
 
 impl Overlay {
@@ -37,10 +51,15 @@ impl Overlay {
         Self::Static(StaticOverlay::with_title(lines, title))
     }
 
+    pub(crate) fn new_terminal(params: TerminalOverlayOpen, app_event_tx: AppEventSender) -> Self {
+        Self::Terminal(TerminalOverlay::new(params, app_event_tx))
+    }
+
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         match self {
             Overlay::Transcript(o) => o.handle_event(tui, event),
             Overlay::Static(o) => o.handle_event(tui, event),
+            Overlay::Terminal(o) => o.handle_event(tui, event),
         }
     }
 
@@ -48,7 +67,384 @@ impl Overlay {
         match self {
             Overlay::Transcript(o) => o.is_done(),
             Overlay::Static(o) => o.is_done(),
+            Overlay::Terminal(o) => o.is_done(),
         }
+    }
+}
+
+const TERMINAL_MAX_BUFFER_LINES: usize = 4000;
+const TERMINAL_HEADER_HEIGHT: u16 = 2;
+const TERMINAL_FOOTER_HEIGHT: u16 = 2;
+const TERMINAL_SPINNER_INTERVAL: Duration = Duration::from_millis(120);
+const TERMINAL_HINTS_RUNNING: &[(&str, &str)] = &[
+    ("Esc", "detach"),
+    ("Ctrl+C", "interrupt"),
+    ("Ctrl+D", "EOF"),
+    ("Ctrl+Z", "suspend"),
+];
+const TERMINAL_HINTS_DONE: &[(&str, &str)] = &[("Esc", "close"), ("Enter", "close")];
+
+pub(crate) struct TerminalOverlay {
+    view: PagerView,
+    lines: Vec<Line<'static>>,
+    pending_line: String,
+    call_id: String,
+    command_display: String,
+    cwd: PathBuf,
+    session_id: Option<String>,
+    started_at: Instant,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    is_done: bool,
+    app_event_tx: AppEventSender,
+    lines_dirty: bool,
+}
+
+impl TerminalOverlay {
+    pub(crate) fn new(params: TerminalOverlayOpen, app_event_tx: AppEventSender) -> Self {
+        let command_display = try_join(params.command.iter().map(String::as_str))
+            .unwrap_or_else(|_| params.command.join(" "));
+        let mut view = PagerView::new(
+            vec![Text::from(Vec::<Line<'static>>::new())],
+            String::new(),
+            usize::MAX,
+        );
+        view.wrap_cache = None;
+        Self {
+            view,
+            lines: Vec::new(),
+            pending_line: String::new(),
+            call_id: params.call_id,
+            command_display,
+            cwd: params.cwd,
+            session_id: params.session_id,
+            started_at: params.started_at,
+            exit_code: None,
+            timed_out: false,
+            is_done: false,
+            app_event_tx,
+            lines_dirty: true,
+        }
+    }
+
+    pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
+        match event {
+            TuiEvent::Key(key_event) => self.handle_key_event(tui, key_event),
+            TuiEvent::Paste(text) => {
+                self.send_bytes(text.into_bytes());
+                Ok(())
+            }
+            TuiEvent::Draw => {
+                self.draw(tui)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn handle_key_event(&mut self, tui: &mut tui::Tui, key_event: KeyEvent) -> Result<()> {
+        match key_event {
+            KeyEvent {
+                code: KeyCode::Esc,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            } => {
+                self.is_done = true;
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                kind: KeyEventKind::Press,
+                ..
+            } if self.exit_code.is_some() => {
+                self.is_done = true;
+            }
+            key_event => {
+                if let Some(bytes) = Self::key_event_to_bytes(key_event) {
+                    self.send_bytes(bytes);
+                }
+            }
+        }
+        if self.exit_code.is_none() {
+            tui.frame_requester()
+                .schedule_frame_in(TERMINAL_SPINNER_INTERVAL);
+        }
+        Ok(())
+    }
+
+    fn draw(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        let viewport = tui.terminal.viewport_area;
+        let result = tui.draw(viewport.height, |frame| {
+            let area = frame.area();
+            self.render(area, frame.buffer);
+        });
+        if self.exit_code.is_none() {
+            tui.frame_requester()
+                .schedule_frame_in(TERMINAL_SPINNER_INTERVAL);
+        }
+        result
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
+        let header_area = Rect::new(area.x, area.y, area.width, TERMINAL_HEADER_HEIGHT);
+        self.render_header(header_area, buf);
+
+        let footer_y = area
+            .y
+            .saturating_add(area.height.saturating_sub(TERMINAL_FOOTER_HEIGHT));
+        let footer_area = Rect::new(area.x, footer_y, area.width, TERMINAL_FOOTER_HEIGHT);
+        self.render_footer(footer_area, buf);
+
+        if area.height <= TERMINAL_HEADER_HEIGHT + TERMINAL_FOOTER_HEIGHT {
+            return;
+        }
+        let content_height = area.height - TERMINAL_HEADER_HEIGHT - TERMINAL_FOOTER_HEIGHT;
+        let content_area = Rect::new(
+            area.x,
+            area.y + TERMINAL_HEADER_HEIGHT,
+            area.width,
+            content_height,
+        );
+        self.render_content(content_area, buf);
+    }
+
+    fn render_header(&self, area: Rect, buf: &mut Buffer) {
+        let mut line1_spans: Vec<Span> = Vec::new();
+        if let Some(code) = self.exit_code {
+            if self.timed_out {
+                line1_spans.push("Timed out".red().bold());
+            } else if code == 0 {
+                line1_spans.push("✓".green().bold());
+                line1_spans.push(" ".into());
+                line1_spans.push("Completed".green());
+            } else {
+                line1_spans.push(format!("✗ ({code})").red().bold());
+            }
+        } else {
+            line1_spans.push(spinner(Some(self.started_at)));
+            line1_spans.push(" ".into());
+            line1_spans.push("Running".green());
+        }
+        line1_spans.push(" ".into());
+        line1_spans.push(self.command_display.clone().into());
+        let line1: Line = line1_spans.into();
+
+        let elapsed = format_duration(self.started_at.elapsed());
+        let mut line2_spans: Vec<Span> = Vec::new();
+        line2_spans.push(Span::from(self.cwd.display().to_string()).dim());
+        line2_spans.push(" • ".dim());
+        if self.exit_code.is_none() {
+            line2_spans.push(format!("elapsed {elapsed}").dim());
+        } else {
+            line2_spans.push(format!("duration {elapsed}").dim());
+        }
+        if let Some(session) = &self.session_id {
+            line2_spans.push(" • ".dim());
+            line2_spans.push(format!("session {session}").dim());
+        }
+        let line2: Line = line2_spans.into();
+
+        Paragraph::new(vec![line1, line2]).render_ref(area, buf);
+    }
+
+    fn render_footer(&self, area: Rect, buf: &mut Buffer) {
+        let hints = if self.exit_code.is_none() {
+            TERMINAL_HINTS_RUNNING
+        } else {
+            TERMINAL_HINTS_DONE
+        };
+        render_key_hints(area, buf, hints);
+    }
+
+    fn render_content(&mut self, area: Rect, buf: &mut Buffer) {
+        if area.height == 0 {
+            return;
+        }
+        self.sync_view_if_dirty();
+        self.view.update_last_content_height(area.height);
+        self.view.ensure_wrapped(area.width);
+
+        let visible = area.height as usize;
+        let wrapped_len = self.view.cached().len();
+        let max_scroll = wrapped_len.saturating_sub(visible);
+        self.view.scroll_offset = self.view.scroll_offset.min(max_scroll);
+
+        let start = self.view.scroll_offset;
+        let end = (start + visible).min(wrapped_len);
+        let wrapped = self.view.cached();
+        let page = &wrapped[start..end];
+        self.view.render_content_page_prepared(area, buf, page);
+    }
+
+    fn sync_view_if_dirty(&mut self) {
+        if !self.lines_dirty {
+            return;
+        }
+        let mut combined: Vec<Line<'static>> = self.lines.clone();
+        if !self.pending_line.is_empty() {
+            combined.push(ansi_escape_line(&self.pending_line));
+        }
+        self.view.texts = vec![Text::from(combined)];
+        self.view.wrap_cache = None;
+        self.lines_dirty = false;
+    }
+
+    fn send_bytes(&self, bytes: Vec<u8>) {
+        if bytes.is_empty() || self.exit_code.is_some() {
+            return;
+        }
+        let op = Op::ExecWriteInput(ExecWriteInput {
+            call_id: self.call_id.clone(),
+            chunk: bytes,
+        });
+        self.app_event_tx.send(AppEvent::CodexOp(op));
+    }
+
+    pub(crate) fn push_chunk(&mut self, _stream: ExecOutputStream, chunk: Vec<u8>) {
+        if chunk.is_empty() {
+            return;
+        }
+        let follow_bottom = self.view.is_scrolled_to_bottom();
+        let text = String::from_utf8_lossy(&chunk).to_string();
+        let mut merged = if self.pending_line.is_empty() {
+            text
+        } else {
+            let mut merged = std::mem::take(&mut self.pending_line);
+            merged.push_str(&text);
+            merged
+        };
+
+        merged = merged.replace('\r', "\n");
+
+        for segment in merged.split_inclusive('\n') {
+            if segment.ends_with('\n') {
+                let trimmed = segment.trim_end_matches(['\n', '\r']);
+                self.append_line(ansi_escape_line(trimmed));
+                self.trim_history();
+            } else {
+                self.pending_line = segment.to_string();
+            }
+        }
+
+        if follow_bottom {
+            self.view.scroll_offset = usize::MAX;
+        }
+        self.lines_dirty = true;
+    }
+
+    fn append_line(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+    }
+
+    fn trim_history(&mut self) {
+        if self.lines.len() > TERMINAL_MAX_BUFFER_LINES {
+            let overflow = self.lines.len() - TERMINAL_MAX_BUFFER_LINES;
+            self.lines.drain(0..overflow);
+        }
+    }
+
+    pub(crate) fn mark_finished(
+        &mut self,
+        exit_code: i32,
+        timed_out: bool,
+        aggregated_output: &str,
+    ) {
+        self.exit_code = Some(exit_code);
+        self.timed_out = timed_out;
+        if !aggregated_output.is_empty() {
+            let snapshot: Vec<Line<'static>> = aggregated_output
+                .replace('\r', "\n")
+                .lines()
+                .map(ansi_escape_line)
+                .collect();
+            if snapshot.len() > self.lines.len() {
+                self.lines = snapshot;
+                self.pending_line.clear();
+            }
+        }
+        self.lines_dirty = true;
+    }
+
+    pub(crate) fn matches_call(&self, call_id: &str) -> bool {
+        self.call_id == call_id
+    }
+
+    fn key_event_to_bytes(key_event: KeyEvent) -> Option<Vec<u8>> {
+        match key_event.kind {
+            KeyEventKind::Press | KeyEventKind::Repeat => {}
+            _ => return None,
+        }
+        let mods = key_event.modifiers;
+        let with_alt_prefix = |seq: Vec<u8>| {
+            if mods.contains(KeyModifiers::ALT) {
+                let mut prefixed = Vec::with_capacity(seq.len() + 1);
+                prefixed.push(0x1b);
+                prefixed.extend_from_slice(&seq);
+                prefixed
+            } else {
+                seq
+            }
+        };
+
+        match key_event.code {
+            KeyCode::Enter => Some(vec![b'\r']),
+            KeyCode::Backspace => Some(vec![0x7f]),
+            KeyCode::Tab => Some(vec![b'\t']),
+            KeyCode::Delete => Some(with_alt_prefix(vec![0x1b, b'[', b'3', b'~'])),
+            KeyCode::Insert => Some(with_alt_prefix(vec![0x1b, b'[', b'2', b'~'])),
+            KeyCode::Home => Some(with_alt_prefix(vec![0x1b, b'[', b'H'])),
+            KeyCode::End => Some(with_alt_prefix(vec![0x1b, b'[', b'F'])),
+            KeyCode::PageUp => Some(with_alt_prefix(vec![0x1b, b'[', b'5', b'~'])),
+            KeyCode::PageDown => Some(with_alt_prefix(vec![0x1b, b'[', b'6', b'~'])),
+            KeyCode::Up => Some(with_alt_prefix(vec![0x1b, b'[', b'A'])),
+            KeyCode::Down => Some(with_alt_prefix(vec![0x1b, b'[', b'B'])),
+            KeyCode::Left => Some(with_alt_prefix(vec![0x1b, b'[', b'D'])),
+            KeyCode::Right => Some(with_alt_prefix(vec![0x1b, b'[', b'C'])),
+            KeyCode::Char(ch) => {
+                if mods.contains(KeyModifiers::CONTROL) {
+                    let mapped = match ch {
+                        '?' => 0x7f,
+                        _ => (ch.to_ascii_lowercase() as u8) & 0x1f,
+                    };
+                    if mods.contains(KeyModifiers::ALT) {
+                        return Some(vec![0x1b, mapped]);
+                    }
+                    return Some(vec![mapped]);
+                }
+                let mut out = Vec::new();
+                if mods.contains(KeyModifiers::ALT) {
+                    out.push(0x1b);
+                }
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                Some(out)
+            }
+            KeyCode::F(n @ 1..=12) => {
+                let tail: &[u8] = match n {
+                    1 => b"OP",
+                    2 => b"OQ",
+                    3 => b"OR",
+                    4 => b"OS",
+                    5 => b"[15~",
+                    6 => b"[17~",
+                    7 => b"[18~",
+                    8 => b"[19~",
+                    9 => b"[20~",
+                    10 => b"[21~",
+                    11 => b"[23~",
+                    12 => b"[24~",
+                    _ => return None,
+                };
+                let mut seq = Vec::with_capacity(tail.len() + 1);
+                seq.push(0x1b);
+                seq.extend_from_slice(tail);
+                Some(with_alt_prefix(seq))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_done(&self) -> bool {
+        self.is_done
     }
 }
 

@@ -22,10 +22,20 @@
 
 ## 🖥️ TUI Overlay & Interaction
 - [ ] Add `Overlay::Terminal` that enters alt-screen, renders PTY output, and shows status header.
+  - [x] Define `TerminalOverlay` struct + `TerminalOverlayOpen` params (command, call_id, started_at, cwd, session id).
+  - [x] Render scrollback buffer using `ansi_escape_line` + wrapping helpers; show header with command + cwd.
+  - [x] Track spinner / elapsed timer in header, show status badges (Running, Timed Out, Exit Code).
 - [ ] Forward key events (including Ctrl+C/Z, resize) to the PTY via the new op.
+  - [x] Implement key-to-byte mapping (Enter, Backspace, arrows, Ctrl key combos) and send `Op::ExecWriteInput`.
+  - [ ] Handle window resize events – send size deltas via core once protocol supports it (stub for now).
 - [ ] Provide UI affordances to exit overlay (Esc, Ctrl+D when process ends, etc.).
+  - [ ] Close overlay when process exits cleanly and buffer drained; restore transcript scrollback.
+  - [x] Allow user to exit manually with Esc/`Ctrl+[` while keeping process alive (detach behavior decision).
 - [ ] Sync overlay lifecycle with `ExecCommandBegin/End` so history cells remain accurate.
+  - [x] Open overlay on interactive `ExecCommandBegin`; stream deltas to buffer; update status on `ExecCommandEnd`.
+  - [x] Defer history inserts while overlay active; flush backlog on close.
 - [ ] Ensure accessibility: maintain color styling via `ansi_escape_line`, support narrow terminals.
+  - [x] Clamp line width to viewport; wrap with `word_wrap_lines`; support fallback when width < 4 cols.
 
 ## 🔄 Non-blocking Monitoring for Non-Interactive Runs
 - [ ] Emit `ExecCommandOutputDelta` events for pipe-based executions too, enabling live log tails.
