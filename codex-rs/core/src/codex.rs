@@ -804,6 +804,8 @@ impl Session {
             command_for_display,
             cwd,
             apply_patch,
+            interactive,
+            session_id,
         } = exec_command_context;
         let msg = match apply_patch {
             Some(ApplyPatchCommandContext {
@@ -822,6 +824,8 @@ impl Session {
                 call_id,
                 command: command_for_display.clone(),
                 cwd,
+                interactive,
+                session_id,
                 parsed_cmd: parse_command(&command_for_display)
                     .into_iter()
                     .map(Into::into)
@@ -1064,6 +1068,8 @@ pub(crate) struct ExecCommandContext {
     pub(crate) command_for_display: Vec<String>,
     pub(crate) cwd: PathBuf,
     pub(crate) apply_patch: Option<ApplyPatchCommandContext>,
+    pub(crate) interactive: bool,
+    pub(crate) session_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1426,6 +1432,12 @@ async fn submission_loop(
                     review_request,
                 )
                 .await;
+            }
+            Op::ExecWriteInput(input) => {
+                warn!(
+                    ?input,
+                    "exec write input received but interactive exec support not yet enabled"
+                );
             }
             _ => {
                 // Ignore unknown ops; enum is non_exhaustive to allow extensions.
@@ -2698,6 +2710,8 @@ async fn handle_container_exec_with_params(
                 changes: convert_apply_patch_to_protocol(&action),
             },
         ),
+        interactive: false,
+        session_id: None,
     };
 
     let params = maybe_translate_shell_command(params, sess, turn_context);

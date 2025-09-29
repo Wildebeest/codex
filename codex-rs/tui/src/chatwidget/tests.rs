@@ -543,6 +543,8 @@ fn begin_exec(chat: &mut ChatWidget, call_id: &str, raw_cmd: &str) {
             call_id: call_id.to_string(),
             command,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            interactive: false,
+            session_id: None,
             parsed_cmd,
         }),
     });
@@ -1053,6 +1055,8 @@ async fn binary_size_transcript_snapshot() {
                                     call_id: e.call_id.clone(),
                                     command: e.command,
                                     cwd: e.cwd,
+                                    interactive: e.interactive,
+                                    session_id: e.session_id,
                                     parsed_cmd: parsed_cmd
                                         .into_iter()
                                         .map(std::convert::Into::into)
@@ -2036,6 +2040,8 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
             call_id: "c1".into(),
             command: vec!["bash".into(), "-lc".into(), "rg \"Change Approved\"".into()],
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            interactive: false,
+            session_id: None,
             parsed_cmd: vec![
                 codex_core::parse_command::ParsedCommand::Search {
                     query: Some("Change Approved".into()),

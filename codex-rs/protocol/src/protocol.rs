@@ -135,6 +135,9 @@ pub enum Op {
         decision: ReviewDecision,
     },
 
+    /// Write raw bytes to the stdin of an interactive exec session.
+    ExecWriteInput(ExecWriteInput),
+
     /// Approve a code patch
     PatchApproval {
         /// The id of the submission we are approving
@@ -1051,6 +1054,12 @@ pub struct ExecCommandBeginEvent {
     pub command: Vec<String>,
     /// The command's working directory if not the default cwd for the agent.
     pub cwd: PathBuf,
+    /// True when this command is running in an interactive PTY session.
+    #[serde(default)]
+    pub interactive: bool,
+    /// Identifier for the interactive session, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub parsed_cmd: Vec<ParsedCommand>,
 }
 
@@ -1079,6 +1088,18 @@ pub struct ExecCommandEndEvent {
 pub enum ExecOutputStream {
     Stdout,
     Stderr,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+pub struct ExecWriteInput {
+    /// Identifier for the interactive exec command.
+    pub call_id: String,
+
+    /// Raw bytes (base64 encoded on the wire) to forward to the command's stdin.
+    #[serde_as(as = "serde_with::base64::Base64")]
+    #[ts(type = "string")]
+    pub chunk: Vec<u8>,
 }
 
 #[serde_as]

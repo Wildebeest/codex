@@ -345,6 +345,8 @@ fn exec_command_end_success_produces_completed_command_item() {
             call_id: "1".to_string(),
             command: vec!["bash".to_string(), "-lc".to_string(), "echo hi".to_string()],
             cwd: std::env::current_dir().unwrap(),
+            interactive: false,
+            session_id: None,
             parsed_cmd: Vec::new(),
         }),
     );
@@ -405,6 +407,8 @@ fn exec_command_end_failure_produces_failed_command_item() {
             call_id: "2".to_string(),
             command: vec!["sh".to_string(), "-c".to_string(), "exit 1".to_string()],
             cwd: std::env::current_dir().unwrap(),
+            interactive: false,
+            session_id: None,
             parsed_cmd: Vec::new(),
         }),
     );
