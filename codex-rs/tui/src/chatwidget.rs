@@ -325,6 +325,23 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
 }
 
 impl ChatWidget {
+    fn should_force_interactive(ev: &ExecCommandBeginEvent) -> bool {
+        let mut args = ev.command.iter().map(String::as_str);
+        if let Some(first) = args.next() {
+            if first == "sudo" {
+                return true;
+            }
+            if (first == "bash" || first == "sh")
+                && let Some(second) = args.next()
+                && (second == "-c" || second == "-lc")
+                && let Some(script) = args.next()
+                && script.split_whitespace().next() == Some("sudo")
+            {
+                return true;
+            }
+        }
+        ev.command.iter().any(|arg| arg == "sudo")
+    }
     fn flush_answer_stream_with_separator(&mut self) {
         if let Some(mut controller) = self.stream_controller.take()
             && let Some(cell) = controller.finalize()
@@ -931,7 +948,9 @@ impl ChatWidget {
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
         let started_at = Instant::now();
-        if ev.interactive {
+        let forced_interactive = Self::should_force_interactive(&ev);
+        let is_interactive = ev.interactive || forced_interactive;
+        if is_interactive {
             let open = TerminalOverlayOpen {
                 call_id: ev.call_id.clone(),
                 command: ev.command.clone(),
@@ -953,7 +972,7 @@ impl ChatWidget {
             RunningCommand {
                 command: ev.command.clone(),
                 parsed_cmd: ev.parsed_cmd.clone(),
-                interactive: ev.interactive,
+                interactive: is_interactive,
                 cwd: ev.cwd.clone(),
                 session_id: ev.session_id.clone(),
                 started_at,
