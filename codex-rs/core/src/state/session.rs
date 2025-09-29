@@ -1,8 +1,14 @@
 //! Session-wide mutable state.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use codex_protocol::models::ResponseItem;
+
+use portable_pty::ChildKiller;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::mpsc;
 
 use crate::conversation_history::ConversationHistory;
 use crate::protocol::RateLimitSnapshot;
@@ -16,6 +22,7 @@ pub(crate) struct SessionState {
     pub(crate) history: ConversationHistory,
     pub(crate) token_info: Option<TokenUsageInfo>,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
+    pub(crate) interactive_execs: HashMap<String, InteractiveExecHandle>,
 }
 
 impl SessionState {
@@ -23,6 +30,7 @@ impl SessionState {
     pub(crate) fn new() -> Self {
         Self {
             history: ConversationHistory::new(),
+            interactive_execs: HashMap::new(),
             ..Default::default()
         }
     }
@@ -76,5 +84,60 @@ impl SessionState {
         (self.token_info.clone(), self.latest_rate_limits.clone())
     }
 
-    // Pending input/approval moved to TurnState.
+    #[allow(dead_code)]
+    pub(crate) fn insert_interactive_exec(
+        &mut self,
+        call_id: String,
+        handle: InteractiveExecHandle,
+    ) {
+        self.interactive_execs.insert(call_id, handle);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn remove_interactive_exec(
+        &mut self,
+        call_id: &str,
+    ) -> Option<InteractiveExecHandle> {
+        self.interactive_execs.remove(call_id)
+    }
+
+    pub(crate) fn interactive_exec_handle(&self, call_id: &str) -> Option<InteractiveExecHandle> {
+        self.interactive_execs.get(call_id).cloned()
+    }
+
+    pub(crate) fn drain_interactive_execs(&mut self) -> Vec<InteractiveExecHandle> {
+        self.interactive_execs
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct InteractiveExecHandle {
+    pub(crate) writer: mpsc::Sender<Vec<u8>>,
+    killer: Arc<AsyncMutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
+    #[allow(dead_code)]
+    pub(crate) session_id: String,
+}
+
+impl InteractiveExecHandle {
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        writer: mpsc::Sender<Vec<u8>>,
+        killer: Arc<AsyncMutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
+        session_id: String,
+    ) -> Self {
+        Self {
+            writer,
+            killer,
+            session_id,
+        }
+    }
+
+    pub(crate) async fn kill(&self) {
+        if let Some(mut killer) = self.killer.lock().await.take() {
+            let _ = killer.kill();
+        }
+    }
 }

@@ -53,6 +53,7 @@ pub struct ExecParams {
     pub env: HashMap<String, String>,
     pub with_escalated_permissions: Option<bool>,
     pub justification: Option<String>,
+    pub interactive: bool,
 }
 
 impl ExecParams {

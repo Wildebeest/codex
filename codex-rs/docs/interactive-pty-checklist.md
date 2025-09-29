@@ -8,10 +8,10 @@
 - [ ] Document UX expectations (when overlay appears, how to exit, keyboard shortcuts).
 
 ## 🗄️ Protocol & State Plumbing
-- [ ] Extend protocol: add `interactive` flag and optional PTY session id to `ExecCommandBeginEvent`.
-- [ ] Introduce `Op::ExecWriteInput { call_id, data }` for feeding keystrokes into live sessions.
-- [ ] Update `ExecCommandContext` and related structs to carry interactive metadata.
-- [ ] Track interactive controllers in session/turn state for cleanup and input routing.
+- [x] Extend protocol: add `interactive` flag and optional PTY session id to `ExecCommandBeginEvent`.
+- [x] Introduce `Op::ExecWriteInput { call_id, data }` for feeding keystrokes into live sessions.
+- [x] Update `ExecCommandContext` and related structs to carry interactive metadata.
+- [x] Track interactive controllers in session/turn state for cleanup and input routing.
 
 ## ⚙️ Exec Pipeline Updates
 - [ ] Allow `ExecParams` / `process_exec_tool_call` to select `StdioPolicy::PseudoTerminal`.
@@ -41,4 +41,3 @@
 - [ ] Update `docs/` with user-facing instructions for interactive mode.
 - [ ] Announce in changelog with upgrade notes (new CLI flags, approvals).
 - [ ] Provide fallback guidance if PTY unavailable (e.g. remote shells without TTY support).
-

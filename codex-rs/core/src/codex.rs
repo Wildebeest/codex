@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -116,6 +117,7 @@ use crate::safety::assess_command_safety;
 use crate::safety::assess_safety_for_untrusted_command;
 use crate::shell;
 use crate::state::ActiveTurn;
+use crate::state::InteractiveExecHandle;
 use crate::state::SessionServices;
 use crate::tasks::CompactTask;
 use crate::tasks::RegularTask;
@@ -1027,6 +1029,10 @@ impl Session {
     pub async fn interrupt_task(self: &Arc<Self>) {
         info!("interrupt received: abort current task, if any");
         self.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        let handles = self.drain_interactive_exec_handles().await;
+        for handle in handles {
+            handle.kill().await;
+        }
     }
 
     fn interrupt_task_sync(&self) {
@@ -1052,6 +1058,53 @@ impl Session {
 
     fn show_raw_agent_reasoning(&self) -> bool {
         self.services.show_raw_agent_reasoning
+    }
+}
+
+impl Session {
+    #[allow(dead_code)]
+    pub async fn register_interactive_exec_handle(
+        &self,
+        call_id: String,
+        handle: InteractiveExecHandle,
+    ) {
+        let mut state = self.state.lock().await;
+        state.insert_interactive_exec(call_id, handle);
+    }
+
+    #[allow(dead_code)]
+    pub async fn remove_interactive_exec_handle(
+        &self,
+        call_id: &str,
+    ) -> Option<InteractiveExecHandle> {
+        let mut state = self.state.lock().await;
+        state.remove_interactive_exec(call_id)
+    }
+
+    pub async fn write_to_interactive_exec(
+        &self,
+        call_id: &str,
+        chunk: Vec<u8>,
+    ) -> std::io::Result<()> {
+        let sender = {
+            let state = self.state.lock().await;
+            state
+                .interactive_exec_handle(call_id)
+                .map(|handle| handle.writer)
+        };
+
+        if let Some(tx) = sender {
+            tx.send(chunk)
+                .await
+                .map_err(|_| io::Error::other("interactive exec channel closed"))
+        } else {
+            Err(io::Error::other("interactive exec not found"))
+        }
+    }
+
+    pub async fn drain_interactive_exec_handles(&self) -> Vec<InteractiveExecHandle> {
+        let mut state = self.state.lock().await;
+        state.drain_interactive_execs()
     }
 }
 
@@ -1434,10 +1487,12 @@ async fn submission_loop(
                 .await;
             }
             Op::ExecWriteInput(input) => {
-                warn!(
-                    ?input,
-                    "exec write input received but interactive exec support not yet enabled"
-                );
+                if let Err(err) = sess
+                    .write_to_interactive_exec(&input.call_id, input.chunk)
+                    .await
+                {
+                    warn!(call_id = %input.call_id, ?err, "failed to write to interactive exec");
+                }
             }
             _ => {
                 // Ignore unknown ops; enum is non_exhaustive to allow extensions.
@@ -2190,6 +2245,7 @@ async fn handle_response_item(
                 timeout_ms: action.timeout_ms,
                 with_escalated_permissions: None,
                 justification: None,
+                interactive: None,
             };
             let effective_call_id = match (call_id, id) {
                 (Some(call_id), _) => call_id,
@@ -2417,6 +2473,7 @@ async fn handle_function_call(
                 env: HashMap::new(),
                 with_escalated_permissions: None,
                 justification: None,
+                interactive: false,
             };
             handle_container_exec_with_params(
                 exec_params,
@@ -2488,6 +2545,7 @@ async fn handle_custom_tool_call(
                 env: HashMap::new(),
                 with_escalated_permissions: None,
                 justification: None,
+                interactive: false,
             };
 
             handle_container_exec_with_params(
@@ -2517,6 +2575,7 @@ fn to_exec_params(params: ShellToolCallParams, turn_context: &TurnContext) -> Ex
         env: create_env(&turn_context.shell_environment_policy),
         with_escalated_permissions: params.with_escalated_permissions,
         justification: params.justification,
+        interactive: params.interactive.unwrap_or(false),
     }
 }
 
@@ -2626,6 +2685,7 @@ async fn handle_container_exec_with_params(
                 env: HashMap::new(),
                 with_escalated_permissions: params.with_escalated_permissions,
                 justification: params.justification.clone(),
+                interactive: false,
             };
             let safety = if *user_explicitly_approved_this_action {
                 SafetyCheck::AutoApprove {
@@ -3746,6 +3806,7 @@ mod tests {
             env: HashMap::new(),
             with_escalated_permissions: Some(true),
             justification: Some("test".to_string()),
+            interactive: false,
         };
 
         let params2 = ExecParams {
