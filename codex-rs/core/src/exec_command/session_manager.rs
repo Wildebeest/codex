@@ -347,7 +347,6 @@ async fn create_exec_command_session_with_builder(
     // Reader task: drain PTY and forward chunks to output channel.
     let mut reader = {
         let guard = master.lock().map_err(|_| anyhow!("poisoned pty master"))?;
-        
         guard.try_clone_reader()?
     };
     let output_tx_clone = output_tx.clone();

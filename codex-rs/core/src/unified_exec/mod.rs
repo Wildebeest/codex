@@ -344,7 +344,6 @@ async fn create_unified_exec_session(
         let guard = master
             .lock()
             .map_err(|_| UnifiedExecError::create_session(anyhow!("poisoned pty master")))?;
-        
         guard
             .try_clone_reader()
             .map_err(UnifiedExecError::create_session)?

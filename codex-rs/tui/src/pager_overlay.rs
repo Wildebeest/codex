@@ -77,6 +77,8 @@ const TERMINAL_MAX_BUFFER_LINES: usize = 4000;
 const TERMINAL_HEADER_HEIGHT: u16 = 2;
 const TERMINAL_FOOTER_HEIGHT: u16 = 2;
 const TERMINAL_SPINNER_INTERVAL: Duration = Duration::from_millis(120);
+const TERMINAL_AUTO_CLOSE_DELAY: Duration = Duration::from_millis(500);
+const TERMINAL_AUTO_CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TERMINAL_HINTS_RUNNING: &[(&str, &str)] = &[
     ("Esc", "detach"),
     ("Ctrl+C", "interrupt"),
@@ -100,6 +102,8 @@ pub(crate) struct TerminalOverlay {
     app_event_tx: AppEventSender,
     lines_dirty: bool,
     last_sent_size: Option<(u16, u16)>,
+    finished_at: Option<Instant>,
+    rendered_after_finish: bool,
 }
 
 impl TerminalOverlay {
@@ -127,6 +131,8 @@ impl TerminalOverlay {
             app_event_tx,
             lines_dirty: true,
             last_sent_size: None,
+            finished_at: None,
+            rendered_after_finish: false,
         }
     }
 
@@ -135,10 +141,12 @@ impl TerminalOverlay {
             TuiEvent::Key(key_event) => self.handle_key_event(tui, key_event),
             TuiEvent::Paste(text) => {
                 self.send_bytes(text.into_bytes());
+                self.after_event(tui);
                 Ok(())
             }
             TuiEvent::Draw => {
                 self.draw(tui)?;
+                self.after_event(tui);
                 Ok(())
             }
         }
@@ -170,6 +178,7 @@ impl TerminalOverlay {
             tui.frame_requester()
                 .schedule_frame_in(TERMINAL_SPINNER_INTERVAL);
         }
+        self.after_event(tui);
         Ok(())
     }
 
@@ -210,6 +219,8 @@ impl TerminalOverlay {
         self.render_content(content_area, buf);
         if self.exit_code.is_none() {
             self.maybe_send_resize(content_area.height, content_area.width);
+        } else {
+            self.rendered_after_finish = true;
         }
     }
 
@@ -380,6 +391,8 @@ impl TerminalOverlay {
     ) {
         self.exit_code = Some(exit_code);
         self.timed_out = timed_out;
+        self.finished_at = Some(Instant::now());
+        self.rendered_after_finish = false;
         if !aggregated_output.is_empty() {
             let snapshot: Vec<Line<'static>> = aggregated_output
                 .replace('\r', "\n")
@@ -396,6 +409,25 @@ impl TerminalOverlay {
 
     pub(crate) fn matches_call(&self, call_id: &str) -> bool {
         self.call_id == call_id
+    }
+
+    fn should_auto_close(&self) -> bool {
+        if let Some(finished_at) = self.finished_at {
+            self.rendered_after_finish && finished_at.elapsed() >= TERMINAL_AUTO_CLOSE_DELAY
+        } else {
+            false
+        }
+    }
+
+    fn after_event(&mut self, tui: &mut tui::Tui) {
+        if self.exit_code.is_some() && !self.is_done {
+            if self.should_auto_close() {
+                self.is_done = true;
+            } else {
+                tui.frame_requester()
+                    .schedule_frame_in(TERMINAL_AUTO_CLOSE_POLL_INTERVAL);
+            }
+        }
     }
 
     fn key_event_to_bytes(key_event: KeyEvent) -> Option<Vec<u8>> {

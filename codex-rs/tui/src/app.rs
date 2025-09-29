@@ -172,20 +172,18 @@ impl App {
         tui: &mut tui::Tui,
         event: TuiEvent,
     ) -> Result<bool> {
-        if matches!(self.overlay, Some(Overlay::Terminal(_))) {
-            let should_close = {
-                let overlay = self.overlay.as_mut().expect("overlay present");
-                if let Overlay::Terminal(term) = overlay {
-                    term.handle_event(tui, event)?;
-                    term.is_done()
-                } else {
-                    false
-                }
+        if let Some(Overlay::Terminal(_)) = &self.overlay {
+            let should_close = if let Some(Overlay::Terminal(term)) = self.overlay.as_mut() {
+                term.handle_event(tui, event)?;
+                term.is_done()
+            } else {
+                false
             };
             if should_close {
                 self.close_overlay(tui);
                 tui.frame_requester().schedule_frame();
             }
+            return Ok(true);
         } else if self.overlay.is_some() {
             let _ = self.handle_backtrack_overlay_event(tui, event).await?;
         } else {
