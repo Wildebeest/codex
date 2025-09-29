@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::AuthManager;
 use crate::client_common::REVIEW_PROMPT;
@@ -57,8 +58,10 @@ use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::error::SandboxErr;
 use crate::error::get_error_message_ui;
+use crate::exec::EXEC_TIMEOUT_EXIT_CODE;
 use crate::exec::ExecParams;
 use crate::exec::ExecToolCallOutput;
+use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
 use crate::exec::SandboxType;
 use crate::exec::StdoutStream;
 use crate::exec::StreamOutput;
@@ -66,6 +69,8 @@ use crate::exec::process_exec_tool_call;
 use crate::exec_command::EXEC_COMMAND_TOOL_NAME;
 use crate::exec_command::ExecCommandParams;
 use crate::exec_command::ExecSessionManager;
+use crate::exec_command::InteractiveSession;
+use crate::exec_command::SessionId;
 use crate::exec_command::WRITE_STDIN_TOOL_NAME;
 use crate::exec_command::WriteStdinParams;
 use crate::exec_env::create_env;
@@ -93,6 +98,8 @@ use crate::protocol::EventMsg;
 use crate::protocol::ExecApprovalRequestEvent;
 use crate::protocol::ExecCommandBeginEvent;
 use crate::protocol::ExecCommandEndEvent;
+use crate::protocol::ExecCommandOutputDeltaEvent;
+use crate::protocol::ExecOutputStream;
 use crate::protocol::FileChange;
 use crate::protocol::InputItem;
 use crate::protocol::ListCustomPromptsResponseEvent;
@@ -116,6 +123,7 @@ use crate::safety::SafetyCheck;
 use crate::safety::assess_command_safety;
 use crate::safety::assess_safety_for_untrusted_command;
 use crate::shell;
+use crate::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use crate::state::ActiveTurn;
 use crate::state::InteractiveExecHandle;
 use crate::state::SessionServices;
@@ -909,25 +917,54 @@ impl Session {
     async fn run_exec_with_events<'a>(
         &self,
         turn_diff_tracker: &mut TurnDiffTracker,
-        begin_ctx: ExecCommandContext,
+        mut begin_ctx: ExecCommandContext,
         exec_args: ExecInvokeArgs<'a>,
     ) -> crate::error::Result<ExecToolCallOutput> {
         let is_apply_patch = begin_ctx.apply_patch.is_some();
         let sub_id = begin_ctx.sub_id.clone();
         let call_id = begin_ctx.call_id.clone();
 
+        let ExecInvokeArgs {
+            params,
+            sandbox_type,
+            sandbox_policy,
+            sandbox_cwd,
+            codex_linux_sandbox_exe,
+            stdout_stream,
+        } = exec_args;
+
+        let mut stdout_stream_opt = stdout_stream;
+        let interactive_runtime = if begin_ctx.interactive {
+            Some(
+                self.setup_interactive_exec(
+                    &mut begin_ctx,
+                    &params,
+                    sandbox_type,
+                    sandbox_policy,
+                    stdout_stream_opt.take(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
         self.on_exec_command_begin(turn_diff_tracker, begin_ctx.clone())
             .await;
 
-        let result = process_exec_tool_call(
-            exec_args.params,
-            exec_args.sandbox_type,
-            exec_args.sandbox_policy,
-            exec_args.sandbox_cwd,
-            exec_args.codex_linux_sandbox_exe,
-            exec_args.stdout_stream,
-        )
-        .await;
+        let result = if let Some(runtime) = interactive_runtime {
+            self.run_interactive_exec(runtime, params).await
+        } else {
+            process_exec_tool_call(
+                params,
+                sandbox_type,
+                sandbox_policy,
+                sandbox_cwd,
+                codex_linux_sandbox_exe,
+                stdout_stream_opt,
+            )
+            .await
+        };
 
         let output_stderr;
         let borrowed: &ExecToolCallOutput = match &result {
@@ -955,6 +992,198 @@ impl Session {
         .await;
 
         result
+    }
+
+    async fn setup_interactive_exec(
+        &self,
+        begin_ctx: &mut ExecCommandContext,
+        params: &ExecParams,
+        sandbox_type: SandboxType,
+        sandbox_policy: &SandboxPolicy,
+        stdout_stream: Option<StdoutStream>,
+    ) -> crate::error::Result<InteractiveRuntime> {
+        if sandbox_type != SandboxType::None {
+            return Err(CodexErr::Io(io::Error::other(
+                "interactive exec is not supported when sandboxing is enabled",
+            )));
+        }
+
+        let mut env = params.env.clone();
+        if !sandbox_policy.has_full_network_access() {
+            env.insert(
+                CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR.to_string(),
+                "1".to_string(),
+            );
+        }
+
+        let InteractiveSession {
+            session_id,
+            writer,
+            output_rx,
+            exit_rx,
+            killer,
+        } = self
+            .services
+            .session_manager
+            .spawn_interactive_command(params.command.clone(), params.cwd.clone(), env)
+            .await
+            .map_err(|err| CodexErr::Io(io::Error::other(err)))?;
+
+        let session_id_str = session_id.0.to_string();
+        let killer = Arc::new(tokio::sync::Mutex::new(Some(killer)));
+        let handle = InteractiveExecHandle::new(writer, killer, session_id_str.clone());
+        self.register_interactive_exec_handle(begin_ctx.call_id.clone(), handle)
+            .await;
+
+        begin_ctx.session_id = Some(session_id_str);
+
+        Ok(InteractiveRuntime {
+            session_id,
+            output_rx,
+            exit_rx,
+            stdout_stream,
+            call_id: begin_ctx.call_id.clone(),
+        })
+    }
+
+    async fn run_interactive_exec(
+        &self,
+        runtime: InteractiveRuntime,
+        params: ExecParams,
+    ) -> crate::error::Result<ExecToolCallOutput> {
+        let InteractiveRuntime {
+            session_id,
+            mut output_rx,
+            mut exit_rx,
+            stdout_stream,
+            call_id,
+        } = runtime;
+
+        let timeout = params.timeout_duration();
+        let timeout_sleep = tokio::time::sleep(timeout);
+        tokio::pin!(timeout_sleep);
+
+        let mut aggregated = Vec::with_capacity(INTERACTIVE_AGGREGATE_INITIAL_CAPACITY);
+        let mut emitted_deltas = 0usize;
+        let mut exit_code: Option<i32> = None;
+        let mut timed_out = false;
+        let start = Instant::now();
+
+        loop {
+            if exit_code.is_none() {
+                match exit_rx.try_recv() {
+                    Ok(code) => exit_code = Some(code),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        exit_code = Some(-1);
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                }
+            }
+
+            if exit_code.is_some() && output_rx.is_closed() {
+                break;
+            }
+
+            tokio::select! {
+                _ = &mut timeout_sleep, if !timed_out => {
+                    timed_out = true;
+                    break;
+                }
+                recv = output_rx.recv() => {
+                    match recv {
+                        Ok(chunk) => {
+                            if let Some(stream) = &stdout_stream
+                                && emitted_deltas < MAX_EXEC_OUTPUT_DELTAS_PER_CALL {
+                                    let event = Event {
+                                        id: stream.sub_id.clone(),
+                                        msg: EventMsg::ExecCommandOutputDelta(
+                                            ExecCommandOutputDeltaEvent {
+                                                call_id: stream.call_id.clone(),
+                                                stream: ExecOutputStream::Stdout,
+                                                chunk: chunk.clone(),
+                                            },
+                                        ),
+                                    };
+                                    let _ = stream.tx_event.send(event).await;
+                                    emitted_deltas += 1;
+                                }
+                            aggregated.extend_from_slice(&chunk);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            if exit_code.is_some() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        while let Ok(chunk) = output_rx.try_recv() {
+            if let Some(stream) = &stdout_stream
+                && emitted_deltas < MAX_EXEC_OUTPUT_DELTAS_PER_CALL
+            {
+                let event = Event {
+                    id: stream.sub_id.clone(),
+                    msg: EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
+                        call_id: stream.call_id.clone(),
+                        stream: ExecOutputStream::Stdout,
+                        chunk: chunk.clone(),
+                    }),
+                };
+                let _ = stream.tx_event.send(event).await;
+                emitted_deltas += 1;
+            }
+            aggregated.extend_from_slice(&chunk);
+        }
+
+        let handle = self.remove_interactive_exec_handle(&call_id).await;
+        if timed_out && let Some(ref handle) = handle {
+            handle.kill().await;
+        }
+
+        self.services
+            .session_manager
+            .remove_session(session_id)
+            .await;
+
+        if exit_code.is_none() {
+            match exit_rx.await {
+                Ok(code) => exit_code = Some(code),
+                Err(_) => exit_code = Some(-1),
+            }
+        }
+
+        drop(handle);
+
+        let mut exit_code = exit_code.unwrap_or(-1);
+        if timed_out {
+            exit_code = EXEC_TIMEOUT_EXIT_CODE;
+        }
+
+        let duration = Instant::now().duration_since(start);
+        let stdout_text = String::from_utf8_lossy(&aggregated).to_string();
+        let stdout = StreamOutput::new(stdout_text.clone());
+        let stderr = StreamOutput::new(String::new());
+        let aggregated_output = StreamOutput::new(stdout_text);
+
+        let exec_output = ExecToolCallOutput {
+            exit_code,
+            stdout,
+            stderr,
+            aggregated_output,
+            duration,
+            timed_out,
+        };
+
+        if timed_out {
+            return Err(CodexErr::Sandbox(SandboxErr::Timeout {
+                output: Box::new(exec_output),
+            }));
+        }
+
+        Ok(exec_output)
     }
 
     /// Helper that emits a BackgroundEvent with the given message. This keeps
@@ -1130,6 +1359,16 @@ pub(crate) struct ApplyPatchCommandContext {
     pub(crate) user_explicitly_approved_this_action: bool,
     pub(crate) changes: HashMap<PathBuf, FileChange>,
 }
+
+struct InteractiveRuntime {
+    session_id: SessionId,
+    output_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
+    exit_rx: oneshot::Receiver<i32>,
+    stdout_stream: Option<StdoutStream>,
+    call_id: String,
+}
+
+const INTERACTIVE_AGGREGATE_INITIAL_CAPACITY: usize = 8 * 1024;
 
 async fn submission_loop(
     sess: Arc<Session>,

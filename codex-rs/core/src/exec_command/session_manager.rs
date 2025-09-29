@@ -1,11 +1,14 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::io::Read;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 
+use anyhow::anyhow;
 use portable_pty::CommandBuilder;
 use portable_pty::PtySize;
 use portable_pty::native_pty_system;
@@ -26,6 +29,15 @@ use crate::truncate::truncate_middle;
 pub struct SessionManager {
     next_session_id: AtomicU32,
     sessions: Mutex<HashMap<SessionId, ExecCommandSession>>,
+}
+
+#[derive(Debug)]
+pub struct InteractiveSession {
+    pub session_id: SessionId,
+    pub writer: mpsc::Sender<Vec<u8>>,
+    pub output_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
+    pub exit_rx: oneshot::Receiver<i32>,
+    pub killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
 }
 
 #[derive(Debug)]
@@ -68,6 +80,46 @@ pub enum ExitStatus {
 }
 
 impl SessionManager {
+    pub async fn spawn_interactive_command(
+        &self,
+        command: Vec<String>,
+        cwd: PathBuf,
+        env: HashMap<String, String>,
+    ) -> anyhow::Result<InteractiveSession> {
+        if command.is_empty() {
+            return Err(anyhow!("command args are empty"));
+        }
+
+        let session_id = SessionId(
+            self.next_session_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        );
+
+        let builder = command_builder_from_parts(command, cwd, env)?;
+        let (session, output_rx, exit_rx, killer) =
+            create_exec_command_session_with_builder(builder).await?;
+
+        let writer = session.writer_sender();
+
+        {
+            let mut sessions = self.sessions.lock().await;
+            sessions.insert(session_id, session);
+        }
+
+        Ok(InteractiveSession {
+            session_id,
+            writer,
+            output_rx,
+            exit_rx,
+            killer,
+        })
+    }
+
+    pub async fn remove_session(&self, session_id: SessionId) -> bool {
+        let mut sessions = self.sessions.lock().await;
+        sessions.remove(&session_id).is_some()
+    }
+
     /// Processes the request and is required to send a response via `outgoing`.
     pub async fn handle_exec_command_request(
         &self,
@@ -79,14 +131,15 @@ impl SessionManager {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         );
 
-        let (session, mut output_rx, mut exit_rx) = create_exec_command_session(params.clone())
-            .await
-            .map_err(|err| {
-                format!(
-                    "failed to create exec command session for session id {}: {err}",
-                    session_id.0
-                )
-            })?;
+        let (session, mut output_rx, mut exit_rx, _killer_for_handle) =
+            create_exec_command_session(params.clone())
+                .await
+                .map_err(|err| {
+                    format!(
+                        "failed to create exec command session for session id {}: {err}",
+                        session_id.0
+                    )
+                })?;
 
         // Insert into session map.
         self.sessions.lock().await.insert(session_id, session);
@@ -233,6 +286,7 @@ async fn create_exec_command_session(
     ExecCommandSession,
     tokio::sync::broadcast::Receiver<Vec<u8>>,
     oneshot::Receiver<i32>,
+    Box<dyn portable_pty::ChildKiller + Send + Sync>,
 )> {
     let ExecCommandParams {
         cmd,
@@ -242,6 +296,22 @@ async fn create_exec_command_session(
         login,
     } = params;
 
+    let mut command_builder = CommandBuilder::new(shell);
+    let shell_mode_opt = if login { "-lc" } else { "-c" };
+    command_builder.arg(shell_mode_opt);
+    command_builder.arg(cmd);
+
+    create_exec_command_session_with_builder(command_builder).await
+}
+
+async fn create_exec_command_session_with_builder(
+    command_builder: CommandBuilder,
+) -> anyhow::Result<(
+    ExecCommandSession,
+    tokio::sync::broadcast::Receiver<Vec<u8>>,
+    oneshot::Receiver<i32>,
+    Box<dyn portable_pty::ChildKiller + Send + Sync>,
+)> {
     // Use the native pty implementation for the system
     let pty_system = native_pty_system();
 
@@ -253,15 +323,11 @@ async fn create_exec_command_session(
         pixel_height: 0,
     })?;
 
-    // Spawn a shell into the pty
-    let mut command_builder = CommandBuilder::new(shell);
-    let shell_mode_opt = if login { "-lc" } else { "-c" };
-    command_builder.arg(shell_mode_opt);
-    command_builder.arg(cmd);
-
+    // Spawn the provided command into the pty
     let mut child = pair.slave.spawn_command(command_builder)?;
     // Obtain a killer that can signal the process independently of `.wait()`.
-    let killer = child.clone_killer();
+    let killer_for_session = child.clone_killer();
+    let killer_for_handle = child.clone_killer();
 
     // Channel to forward write requests to the PTY writer.
     let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(128);
@@ -331,13 +397,32 @@ async fn create_exec_command_session(
     let (session, initial_output_rx) = ExecCommandSession::new(
         writer_tx,
         output_tx,
-        killer,
+        killer_for_session,
         reader_handle,
         writer_handle,
         wait_handle,
         exit_status,
     );
-    Ok((session, initial_output_rx, exit_rx))
+    Ok((session, initial_output_rx, exit_rx, killer_for_handle))
+}
+
+fn command_builder_from_parts(
+    command: Vec<String>,
+    cwd: PathBuf,
+    env: HashMap<String, String>,
+) -> anyhow::Result<CommandBuilder> {
+    if command.is_empty() {
+        return Err(anyhow!("command args are empty"));
+    }
+
+    let argv: Vec<OsString> = command.into_iter().map(OsString::from).collect();
+    let mut builder = CommandBuilder::from_argv(argv);
+    builder.cwd(cwd);
+    builder.env_clear();
+    for (key, value) in env {
+        builder.env(key, value);
+    }
+    Ok(builder)
 }
 
 #[cfg(test)]

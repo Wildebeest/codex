@@ -14,11 +14,11 @@
 - [x] Track interactive controllers in session/turn state for cleanup and input routing.
 
 ## ⚙️ Exec Pipeline Updates
-- [ ] Allow `ExecParams` / `process_exec_tool_call` to select `StdioPolicy::PseudoTerminal`.
-- [ ] Reuse `exec_command::SessionManager` (portable-pty) to spawn interactive shells.
-- [ ] Stream PTY output into `ExecCommandOutputDelta` events while aggregating for final results.
-- [ ] Handle interrupts/timeouts by signalling the PTY child and notifying listeners.
-- [ ] Mirror existing approval logic so interactive commands still respect safety gates.
+- [x] Allow `ExecParams` / `process_exec_tool_call` to select `StdioPolicy::PseudoTerminal`.
+- [x] Reuse `exec_command::SessionManager` (portable-pty) to spawn interactive shells.
+- [x] Stream PTY output into `ExecCommandOutputDelta` events while aggregating for final results.
+- [x] Handle interrupts/timeouts by signalling the PTY child and notifying listeners.
+- [x] Mirror existing approval logic so interactive commands still respect safety gates.
 
 ## 🖥️ TUI Overlay & Interaction
 - [ ] Add `Overlay::Terminal` that enters alt-screen, renders PTY output, and shows status header.
@@ -32,6 +32,7 @@
 - [ ] Update `ExecCell` to display streamed output snippets during execution (spinner + tail).
 
 ## 🧪 Testing & Tooling
+- [x] Run `cargo test -p codex-core`.
 - [ ] Add integration test covering interactive session (write stdin, receive echo, exit cleanly).
 - [ ] Exercise seatbelt/landlock flows to ensure PTY path respects sandbox limits.
 - [ ] Update snapshot tests for exec history cells and new overlay UI.
