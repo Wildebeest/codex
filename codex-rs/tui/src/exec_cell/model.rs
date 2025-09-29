@@ -102,6 +102,7 @@ pub(crate) struct ExecCall {
     pub(crate) start_time: Option<Instant>,
     pub(crate) duration: Option<Duration>,
     pub(crate) live_output: LiveCommandOutput,
+    pub(crate) interactive: bool,
 }
 
 #[derive(Debug)]
@@ -119,6 +120,7 @@ impl ExecCell {
         call_id: String,
         command: Vec<String>,
         parsed: Vec<ParsedCommand>,
+        interactive: bool,
     ) -> Option<Self> {
         let call = ExecCall {
             call_id,
@@ -128,6 +130,7 @@ impl ExecCell {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive,
         };
         if self.is_exploring_cell() && Self::is_exploring_call(&call) {
             Some(Self {

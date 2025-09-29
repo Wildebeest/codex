@@ -1444,6 +1444,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive: false,
         });
         // Mark call complete so markers are ✓
         cell.complete_call(
@@ -1476,6 +1477,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive: false,
         });
         // Call 1: Search only
         cell.complete_call(
@@ -1497,6 +1499,7 @@ mod tests {
                     name: "shimmer.rs".into(),
                     cmd: "cat shimmer.rs".into(),
                 }],
+                false,
             )
             .unwrap();
         cell.complete_call(
@@ -1518,6 +1521,7 @@ mod tests {
                     name: "status_indicator_widget.rs".into(),
                     cmd: "cat status_indicator_widget.rs".into(),
                 }],
+                false,
             )
             .unwrap();
         cell.complete_call(
@@ -1559,6 +1563,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive: false,
         });
         cell.complete_call(
             "c1",
@@ -1588,6 +1593,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive: false,
         });
         // Mark call complete so it renders as "Ran"
         cell.complete_call(
@@ -1619,6 +1625,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive: false,
         });
         cell.complete_call(
             &call_id,
@@ -1648,6 +1655,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive: false,
         });
         cell.complete_call(
             &call_id,
@@ -1676,6 +1684,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive: false,
         });
         cell.complete_call(
             &call_id,
@@ -1705,6 +1714,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive: false,
         });
         cell.complete_call(
             &call_id,
@@ -1734,6 +1744,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive: false,
         });
         let stderr: String = (1..=10)
             .map(|n| n.to_string())
@@ -1781,6 +1792,7 @@ mod tests {
             start_time: Some(Instant::now()),
             duration: None,
             live_output: LiveCommandOutput::default(),
+            interactive: false,
         });
 
         let stderr = "error: first line on stderr\nerror: second line on stderr".to_string();

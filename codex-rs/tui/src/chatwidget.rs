@@ -831,6 +831,7 @@ impl ChatWidget {
                 ev.call_id.clone(),
                 command,
                 parsed,
+                running.as_ref().is_some_and(|rc| rc.interactive),
             )));
         }
 
@@ -966,6 +967,7 @@ impl ChatWidget {
                 ev.call_id.clone(),
                 ev.command.clone(),
                 ev.parsed_cmd.clone(),
+                ev.interactive,
             )
         {
             *cell = new_exec;
@@ -976,6 +978,7 @@ impl ChatWidget {
                 ev.call_id.clone(),
                 ev.command.clone(),
                 ev.parsed_cmd,
+                ev.interactive,
             )));
         }
 

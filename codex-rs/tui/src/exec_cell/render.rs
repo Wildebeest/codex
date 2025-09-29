@@ -25,6 +25,7 @@ use textwrap::WordSplitter;
 use unicode_width::UnicodeWidthStr;
 
 pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
+const INTERACTIVE_HINT: &str = "Ctrl+Shift+T to view terminal overlay";
 
 pub(crate) struct OutputLinesParams {
     pub(crate) only_err: bool,
@@ -36,6 +37,7 @@ pub(crate) fn new_active_exec_command(
     call_id: String,
     command: Vec<String>,
     parsed: Vec<ParsedCommand>,
+    interactive: bool,
 ) -> ExecCell {
     ExecCell::new(ExecCall {
         call_id,
@@ -45,6 +47,7 @@ pub(crate) fn new_active_exec_command(
         start_time: Some(Instant::now()),
         duration: None,
         live_output: LiveCommandOutput::default(),
+        interactive,
     })
 }
 
@@ -367,6 +370,14 @@ impl ExecCell {
         }
 
         if call.output.is_none() {
+            if call.interactive {
+                let hint_line = Line::from(INTERACTIVE_HINT.dim());
+                lines.extend(prefix_lines(
+                    vec![hint_line],
+                    Span::from(layout.command_continuation.initial_prefix).dim(),
+                    Span::from(layout.command_continuation.subsequent_prefix).dim(),
+                ));
+            }
             if let Some(live_output) = call.live_output.to_command_output() {
                 Self::push_output_block(&mut lines, width, layout, &live_output);
             }
