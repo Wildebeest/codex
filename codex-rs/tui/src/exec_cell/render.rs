@@ -3,6 +3,7 @@ use std::time::Instant;
 use super::model::CommandOutput;
 use super::model::ExecCall;
 use super::model::ExecCell;
+use super::model::LiveCommandOutput;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::HistoryCell;
 use crate::render::highlight::highlight_bash_to_lines;
@@ -43,6 +44,7 @@ pub(crate) fn new_active_exec_command(
         output: None,
         start_time: Some(Instant::now()),
         duration: None,
+        live_output: LiveCommandOutput::default(),
     })
 }
 
@@ -294,6 +296,13 @@ impl ExecCell {
         }
 
         out.extend(prefix_lines(out_indented, "  └ ".dim(), "    ".into()));
+
+        if let Some(active_call) = self.calls.iter().rev().find(|c| c.output.is_none())
+            && let Some(live_output) = active_call.live_output.to_command_output()
+        {
+            Self::push_output_block(&mut out, width, EXEC_DISPLAY_LAYOUT, &live_output);
+        }
+
         out
     }
 
@@ -357,36 +366,12 @@ impl ExecCell {
             ));
         }
 
-        if let Some(output) = call.output.as_ref() {
-            let raw_output_lines = output_lines(
-                Some(output),
-                OutputLinesParams {
-                    only_err: false,
-                    include_angle_pipe: false,
-                    include_prefix: false,
-                },
-            );
-            let trimmed_output =
-                Self::truncate_lines_middle(&raw_output_lines, layout.output_max_lines);
-
-            let mut wrapped_output: Vec<Line<'static>> = Vec::new();
-            let output_wrap_width = layout.output_block.wrap_width(width);
-            let output_opts =
-                RtOptions::new(output_wrap_width).word_splitter(WordSplitter::NoHyphenation);
-            for line in trimmed_output {
-                push_owned_lines(
-                    &word_wrap_line(&line, output_opts.clone()),
-                    &mut wrapped_output,
-                );
+        if call.output.is_none() {
+            if let Some(live_output) = call.live_output.to_command_output() {
+                Self::push_output_block(&mut lines, width, layout, &live_output);
             }
-
-            if !wrapped_output.is_empty() {
-                lines.extend(prefix_lines(
-                    wrapped_output,
-                    Span::from(layout.output_block.initial_prefix).dim(),
-                    Span::from(layout.output_block.subsequent_prefix),
-                ));
-            }
+        } else if let Some(output) = call.output.as_ref() {
+            Self::push_output_block(&mut lines, width, layout, output);
         }
 
         lines
@@ -436,6 +421,55 @@ impl ExecCell {
 
     fn ellipsis_line(omitted: usize) -> Line<'static> {
         Line::from(vec![format!("… +{omitted} lines").dim()])
+    }
+
+    fn push_output_block(
+        lines: &mut Vec<Line<'static>>,
+        width: u16,
+        layout: ExecDisplayLayout,
+        output: &CommandOutput,
+    ) {
+        let raw_output_lines = output_lines(
+            Some(output),
+            OutputLinesParams {
+                only_err: false,
+                include_angle_pipe: false,
+                include_prefix: false,
+            },
+        );
+        Self::push_output_lines(lines, width, layout, raw_output_lines);
+    }
+
+    fn push_output_lines(
+        lines: &mut Vec<Line<'static>>,
+        width: u16,
+        layout: ExecDisplayLayout,
+        raw_output_lines: Vec<Line<'static>>,
+    ) {
+        let trimmed_output =
+            Self::truncate_lines_middle(&raw_output_lines, layout.output_max_lines);
+        if trimmed_output.is_empty() {
+            return;
+        }
+
+        let mut wrapped_output: Vec<Line<'static>> = Vec::new();
+        let output_wrap_width = layout.output_block.wrap_width(width);
+        let output_opts =
+            RtOptions::new(output_wrap_width).word_splitter(WordSplitter::NoHyphenation);
+        for line in trimmed_output {
+            push_owned_lines(
+                &word_wrap_line(&line, output_opts.clone()),
+                &mut wrapped_output,
+            );
+        }
+
+        if !wrapped_output.is_empty() {
+            lines.extend(prefix_lines(
+                wrapped_output,
+                Span::from(layout.output_block.initial_prefix).dim(),
+                Span::from(layout.output_block.subsequent_prefix),
+            ));
+        }
     }
 }
 

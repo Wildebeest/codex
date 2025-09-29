@@ -40,8 +40,8 @@
   - [ ] Verify screen-reader friendly hints / focus states in overlay.
 
 ## 🔄 Non-blocking Monitoring for Non-Interactive Runs
-- [ ] Emit `ExecCommandOutputDelta` events for pipe-based executions too, enabling live log tails.
-- [ ] Update `ExecCell` to display streamed output snippets during execution (spinner + tail).
+- [x] Emit `ExecCommandOutputDelta` events for pipe-based executions too, enabling live log tails.
+- [x] Update `ExecCell` to display streamed output snippets during execution (spinner + tail).
 
 ## 🧪 Testing & Tooling
 - [x] Run `cargo test -p codex-core`.

@@ -527,14 +527,24 @@ impl ChatWidget {
     }
 
     fn on_exec_command_output_delta(&mut self, ev: ExecCommandOutputDeltaEvent) {
-        if let Some(running) = self.running_commands.get(&ev.call_id)
-            && running.interactive
-        {
-            self.app_event_tx.send(AppEvent::TerminalOverlayChunk {
-                call_id: ev.call_id,
-                stream: ev.stream,
-                chunk: ev.chunk,
-            });
+        if let Some(running) = self.running_commands.get(&ev.call_id) {
+            if running.interactive {
+                self.app_event_tx.send(AppEvent::TerminalOverlayChunk {
+                    call_id: ev.call_id,
+                    stream: ev.stream,
+                    chunk: ev.chunk,
+                });
+                return;
+            }
+
+            if let Some(cell) = self
+                .active_cell
+                .as_mut()
+                .and_then(|c| c.as_any_mut().downcast_mut::<ExecCell>())
+                && cell.append_live_chunk(&ev.call_id, ev.stream, &ev.chunk)
+            {
+                self.request_redraw();
+            }
         }
     }
 
