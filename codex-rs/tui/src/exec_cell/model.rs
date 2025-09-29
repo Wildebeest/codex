@@ -210,6 +210,9 @@ impl ExecCell {
             .rev()
             .find(|c| c.call_id == call_id && c.output.is_none())
         {
+            if call.interactive {
+                return false;
+            }
             call.live_output.append(stream, chunk);
             return true;
         }

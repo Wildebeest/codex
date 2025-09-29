@@ -377,8 +377,7 @@ impl ExecCell {
                     Span::from(layout.command_continuation.initial_prefix).dim(),
                     Span::from(layout.command_continuation.subsequent_prefix).dim(),
                 ));
-            }
-            if let Some(live_output) = call.live_output.to_command_output() {
+            } else if let Some(live_output) = call.live_output.to_command_output() {
                 Self::push_output_block(&mut lines, width, layout, &live_output);
             }
         } else if let Some(output) = call.output.as_ref() {
