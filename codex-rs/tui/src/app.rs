@@ -173,14 +173,23 @@ impl App {
         event: TuiEvent,
     ) -> Result<bool> {
         if let Some(Overlay::Terminal(_)) = &self.overlay {
-            let should_close = if let Some(Overlay::Terminal(term)) = self.overlay.as_mut() {
-                term.handle_event(tui, event)?;
-                term.is_done()
-            } else {
-                false
-            };
+            let (should_close, banner) =
+                if let Some(Overlay::Terminal(term)) = self.overlay.as_mut() {
+                    term.handle_event(tui, event)?;
+                    let banner = if term.take_auto_closed() {
+                        Some(term.completion_banner())
+                    } else {
+                        None
+                    };
+                    (term.is_done(), banner)
+                } else {
+                    (false, None)
+                };
             if should_close {
                 self.close_overlay(tui);
+                if let Some(lines) = banner {
+                    tui.insert_history_lines(lines);
+                }
                 tui.frame_requester().schedule_frame();
             }
             return Ok(true);

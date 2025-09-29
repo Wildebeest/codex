@@ -21,7 +21,7 @@
 - [x] Mirror existing approval logic so interactive commands still respect safety gates.
 
 ## 🖥️ TUI Overlay & Interaction
-- [ ] Add `Overlay::Terminal` that enters alt-screen, renders PTY output, and shows status header.
+- [x] Add `Overlay::Terminal` that enters alt-screen, renders PTY output, and shows status header.
   - [x] Define `TerminalOverlay` struct + `TerminalOverlayOpen` params (command, call_id, started_at, cwd, session id).
   - [x] Render scrollback buffer using `ansi_escape_line` + wrapping helpers; show header with command + cwd.
   - [x] Track spinner / elapsed timer in header, show status badges (Running, Timed Out, Exit Code).
@@ -34,8 +34,10 @@
 - [ ] Sync overlay lifecycle with `ExecCommandBegin/End` so history cells remain accurate.
   - [x] Open overlay on interactive `ExecCommandBegin`; stream deltas to buffer; update status on `ExecCommandEnd`.
   - [x] Defer history inserts while overlay active; flush backlog on close.
+  - [x] Highlight active history cell or tail transcript when overlay auto-closes.
 - [ ] Ensure accessibility: maintain color styling via `ansi_escape_line`, support narrow terminals.
   - [x] Clamp line width to viewport; wrap with `word_wrap_lines`; support fallback when width < 4 cols.
+  - [ ] Verify screen-reader friendly hints / focus states in overlay.
 
 ## 🔄 Non-blocking Monitoring for Non-Interactive Runs
 - [ ] Emit `ExecCommandOutputDelta` events for pipe-based executions too, enabling live log tails.

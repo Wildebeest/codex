@@ -104,6 +104,7 @@ pub(crate) struct TerminalOverlay {
     last_sent_size: Option<(u16, u16)>,
     finished_at: Option<Instant>,
     rendered_after_finish: bool,
+    auto_closed: bool,
 }
 
 impl TerminalOverlay {
@@ -133,6 +134,7 @@ impl TerminalOverlay {
             last_sent_size: None,
             finished_at: None,
             rendered_after_finish: false,
+            auto_closed: false,
         }
     }
 
@@ -393,6 +395,7 @@ impl TerminalOverlay {
         self.timed_out = timed_out;
         self.finished_at = Some(Instant::now());
         self.rendered_after_finish = false;
+        self.auto_closed = false;
         if !aggregated_output.is_empty() {
             let snapshot: Vec<Line<'static>> = aggregated_output
                 .replace('\r', "\n")
@@ -422,12 +425,43 @@ impl TerminalOverlay {
     fn after_event(&mut self, tui: &mut tui::Tui) {
         if self.exit_code.is_some() && !self.is_done {
             if self.should_auto_close() {
+                self.auto_closed = true;
                 self.is_done = true;
             } else {
                 tui.frame_requester()
                     .schedule_frame_in(TERMINAL_AUTO_CLOSE_POLL_INTERVAL);
             }
         }
+    }
+
+    pub(crate) fn take_auto_closed(&mut self) -> bool {
+        let was = self.auto_closed;
+        self.auto_closed = false;
+        was
+    }
+
+    pub(crate) fn completion_banner(&self) -> Vec<Line<'static>> {
+        let mut spans: Vec<Span> = Vec::new();
+        spans.push("↳".green().bold());
+        spans.push(" ".into());
+        spans.push(self.command_display.clone().into());
+        if let Some(exit) = self.exit_code {
+            spans.push(" ".into());
+            let status = if self.timed_out {
+                "timed out".red()
+            } else if exit == 0 {
+                "ok".green()
+            } else {
+                format!("exit {exit}").red()
+            };
+            spans.push(status);
+        }
+        if let Some(finished_at) = self.finished_at {
+            let duration = finished_at.saturating_duration_since(self.started_at);
+            spans.push(" ".into());
+            spans.push(format!("• {}", format_duration(duration)).dim());
+        }
+        vec![spans.into()]
     }
 
     fn key_event_to_bytes(key_event: KeyEvent) -> Option<Vec<u8>> {
